@@ -101,7 +101,7 @@ td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
   </div>
   <div class="card">
     <table>
-      <thead><tr><th>名称</th><th>邮箱</th><th>状态</th><th>5小时用量</th><th>7天用量</th><th style="width:180px">操作</th></tr></thead>
+      <thead><tr><th>名称</th><th>邮箱</th><th>状态</th><th>5小时</th><th>7天</th><th style="width:180px">操作</th></tr></thead>
       <tbody id="accounts-tbody"><tr><td colspan="6" class="empty">还没有账号，点击"添加账号"开始。</td></tr></tbody>
     </table>
   </div>
@@ -189,19 +189,20 @@ async function refreshDashboard() {
     el.innerHTML = '<div class="empty">暂无配额数据，使用 Codex 后将在此显示用量。</div>';
     return;
   }
-  let html = '<table><thead><tr><th>账号</th><th>5小时用量</th><th>5小时上限</th><th>7天用量</th><th>7天上限</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>账号</th><th>5小时用量</th><th>7天用量</th><th>订阅类型</th></tr></thead><tbody>';
   for (const [name, data] of Object.entries(quota)) {
-    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="4" style="color:var(--muted)">暂无数据</td></tr>`; continue; }
-    const d5h = data['5h_usage'] || data.five_hour_usage || 0;
-    const l5h = data['5h_limit'] || data.five_hour_limit || 100;
-    const d7d = data.weekly_usage || 0;
-    const l7d = data.weekly_limit || 100;
+    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="3" style="color:var(--muted)">暂无数据</td></tr>`; continue; }
+    const rl = data.rate_limit || {};
+    const pw = rl.primary_window || {};
+    const sw = rl.secondary_window || {};
+    const d5h = pw.used_percent != null ? pw.used_percent : (data['5h_usage'] || 0);
+    const d7d = sw.used_percent != null ? sw.used_percent : (data.weekly_usage || 0);
+    const plan = data.plan_type || '—';
     html += `<tr>
       <td><strong>${esc(name)}</strong></td>
-      <td>${usageBar(d5h, l5h)} ${d5h}/${l5h}</td>
-      <td>${usageBar(d5h, l5h)}</td>
-      <td>${usageBar(d7d, l7d)} ${d7d}/${l7d}</td>
-      <td>${usageBar(d7d, l7d)}</td>
+      <td>${usageBar(d5h,100)} ${d5h}%</td>
+      <td>${usageBar(d7d,100)} ${d7d}%</td>
+      <td style="color:var(--muted)">${esc(plan)}</td>
     </tr>`;
   }
   html += '</tbody></table>';
@@ -230,16 +231,17 @@ async function refreshAccounts() {
     if (a.rate_limited) statusHTML += `<span class="badge badge-cool mr">限流中</span>`;
     statusHTML += a.enabled ? `<span class="badge badge-on">活跃</span>` : `<span class="badge badge-off">已禁用</span>`;
     const q = quota[a.name] || {};
-    const d5h = q['5h_usage'] || q.five_hour_usage || 0;
-    const l5h = q['5h_limit'] || q.five_hour_limit || '—';
-    const d7d = q.weekly_usage || 0;
-    const l7d = q.weekly_limit || '—';
+    const rl = q.rate_limit || {};
+    const pw = rl.primary_window || {};
+    const sw = rl.secondary_window || {};
+    const d5h = pw.used_percent != null ? pw.used_percent : (q['5h_usage'] || 0);
+    const d7d = sw.used_percent != null ? sw.used_percent : (q.weekly_usage || 0);
     return `<tr>
       <td><strong>${esc(a.name)}</strong></td>
       <td style="color:var(--muted)">${esc(a.email || '—')}</td>
       <td>${statusHTML}</td>
-      <td>${usageBar(d5h, Number(l5h) || 100)} <small>${d5h}/${l5h}</small></td>
-      <td>${usageBar(d7d, Number(l7d) || 100)} <small>${d7d}/${l7d}</small></td>
+      <td>${usageBar(d5h, 100)} <small>${d5h}%</small></td>
+      <td>${usageBar(d7d, 100)} <small>${d7d}%</small></td>
       <td class="flex">
         <button class="btn btn-sm btn-ghost" onclick="toggleAccount('${esc(a.name)}')">${a.enabled ? '禁用' : '启用'}</button>
         <button class="btn btn-sm btn-ghost" onclick="refreshToken('${esc(a.name)}')">刷新令牌</button>
