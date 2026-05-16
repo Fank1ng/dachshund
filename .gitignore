@@ -1,5 +1,7 @@
 accounts/
+.DS_Store
 *.pyc
 __pycache__/
 .env
 *.log
+recent_requests.json

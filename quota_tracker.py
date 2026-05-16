@@ -44,27 +44,40 @@ async def _fetch_usage(account) -> Optional[dict]:
 
 
 async def _run_once(pool: AccountPool) -> None:
+    await refresh_once(pool)
+
+
+async def refresh_once(pool: AccountPool) -> dict:
+    """Fetch and persist quota data for all enabled accounts once."""
+    result = {}
     for acct in pool.accounts:
         if not acct.enabled:
+            result[acct.name] = {"refreshed": False, "skipped": "disabled"}
             continue
         data = await _fetch_usage(acct)
         if data:
             quota_file = ACCOUNTS_DIR / acct.name / "quota.json"
             data["_fetched_at"] = time.time()
             quota_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(quota_file, "w") as f:
+            tmp_file = quota_file.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
                 json.dump(data, f, indent=2)
+                f.write("\n")
+            tmp_file.replace(quota_file)
             logger.debug(f"Account {acct.name}: quota updated")
+            result[acct.name] = {"refreshed": True, "fetched_at": data["_fetched_at"]}
+        else:
+            result[acct.name] = {"refreshed": False, "error": "usage_unavailable"}
         # Small delay between accounts to avoid triggering rate limits
         await asyncio.sleep(1)
+    return result
 
 
 async def run(pool: AccountPool) -> None:
     """Run the quota tracker loop. Meant to be launched as a background task."""
-    interval = get("quota_refresh_interval")
     while True:
         try:
             await _run_once(pool)
         except Exception as e:
             logger.error(f"quota tracker error: {e}")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(get("quota_refresh_interval"))

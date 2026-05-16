@@ -1,0 +1,739 @@
+#!/usr/bin/env python3
+"""Non-GUI actions used by the macOS app launcher and command shortcuts."""
+
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import time
+from typing import Optional
+import urllib.error
+import urllib.request
+
+from account_manager import Account, AccountPool, account_dir, validate_account_name
+import codex_config
+import config
+from login_manager import find_codex_cli
+import service_manager
+
+
+APP_URL = "http://127.0.0.1:8800/app"
+STATUS_URL = "http://127.0.0.1:8800/api/status"
+HEALTH_URL = "http://127.0.0.1:8800/api/health"
+CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
+
+KEY_LABELS = {
+    "action": "动作",
+    "installed": "后台服务已安装",
+    "loaded": "后台服务已加载",
+    "needs_repair": "需要修复",
+    "enabled": "已启用",
+    "mode": "模式",
+    "running": "代理在线",
+    "active_accounts": "可用账号数",
+    "total_accounts": "账号总数",
+    "source_dir": "源码目录",
+    "runtime_dir": "运行目录",
+    "restart_required": "需要重启",
+    "command": "命令",
+    "account": "账号",
+    "account_dir": "账号目录",
+    "deleted": "已删除账号",
+    "trashed_to": "已移到",
+    "accounts": "账号列表",
+    "error": "错误",
+    "log_path": "日志文件",
+    "pid": "进程 ID",
+    "started": "已启动",
+    "refreshed": "已刷新",
+    "auth_error": "认证异常",
+    "previous_auth_error": "原异常状态",
+    "source_app": "App 入口",
+    "app_bundle": "App 位置",
+    "resource_runtime_dir": "App 内置运行资源",
+    "accounts_dir": "账号目录",
+    "config_path": "配置文件",
+    "result_path": "结果文件",
+    "python": "Python",
+    "pythonpath": "Python 包路径",
+    "dependencies": "依赖项",
+    "name": "名称",
+    "email": "邮箱",
+    "has_tokens": "已有令牌",
+    "rate_limited": "冷却中",
+}
+
+VALUE_LABELS = {
+    "already_running": "代理已在运行",
+    "started_or_repaired": "已启动或修复",
+    "apply_update": "应用更新",
+    "enable_codex_proxy": "启用 Codex 代理",
+    "disable_codex_proxy": "Codex 直连",
+    "scan_accounts": "扫描账号",
+    "scan_accounts_local": "本地扫描账号",
+    "list_accounts": "列出账号",
+    "login_command": "生成登录命令",
+    "start_login": "打开登录页",
+    "import_current": "导入当前账号",
+    "toggle_account": "启用/禁用账号",
+    "toggle_account_local": "本地启用/禁用账号",
+    "delete_account": "删除账号",
+    "delete_account_local": "本地删除账号",
+    "refresh_token": "刷新账号令牌",
+    "refresh_token_local": "本地刷新账号令牌",
+    "clear_cooldown": "解除账号冷却",
+    "clear_auth_error": "解除账号异常状态",
+    "clear_auth_error_local": "本地解除账号异常状态",
+    "show_paths": "查看路径与依赖",
+    "login_started": "登录已启动",
+    "request failed": "请求失败",
+    "account already has auth.json": "账号已经存在 auth.json",
+    "account not found": "账号不存在",
+    "codex_pool_provider": "账号池代理",
+    "partial_chatgpt_backend": "部分代理配置",
+    "legacy_openai_provider": "旧版代理配置",
+    "direct": "直连",
+    "proxy is offline; cooldown is in-memory and clears when the proxy restarts": (
+        "代理离线；冷却状态只保存在内存中，代理重启后会自然清除"
+    ),
+}
+
+
+def fetch_json_url(url: str, timeout: float = 3.0) -> Optional[dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if response.status == 200:
+                return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        pass
+    try:
+        result = subprocess.run(
+            ["curl", "-sS", "--max-time", str(max(1, int(timeout))), url],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def fetch_api(path: str, *, method: str = "GET", timeout: float = 5.0):
+    url = f"http://127.0.0.1:8800{path}"
+    try:
+        request = urllib.request.Request(url, data=b"" if method != "GET" else None, method=method)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def proxy_status(timeout: float = 3.0) -> Optional[dict]:
+    health = fetch_json_url(HEALTH_URL, timeout)
+    if health and health.get("running"):
+        return health
+    return fetch_json_url(STATUS_URL, timeout)
+
+
+def wait_for_proxy(timeout: float = 25.0) -> Optional[dict]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = proxy_status(timeout=2)
+        if status:
+            return status
+        time.sleep(0.5)
+    return None
+
+
+def _localized_value(value):
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if value is None:
+        return "无"
+    if isinstance(value, str):
+        if value.startswith("not found: "):
+            return "未找到：" + value.removeprefix("not found: ")
+        return VALUE_LABELS.get(value, value)
+    if isinstance(value, list):
+        return [_localized_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            KEY_LABELS.get(key, key): _localized_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def compact(data: dict) -> str:
+    keys = (
+        "action",
+        "installed",
+        "loaded",
+        "needs_repair",
+        "enabled",
+        "mode",
+        "running",
+        "active_accounts",
+        "total_accounts",
+        "source_dir",
+        "runtime_dir",
+        "restart_required",
+        "command",
+        "account",
+        "account_dir",
+        "deleted",
+        "trashed_to",
+        "accounts",
+        "error",
+        "log_path",
+        "pid",
+        "started",
+        "source_app",
+        "app_bundle",
+        "resource_runtime_dir",
+        "accounts_dir",
+        "config_path",
+        "result_path",
+        "python",
+        "pythonpath",
+        "dependencies",
+        "refreshed",
+        "auth_error",
+        "previous_auth_error",
+    )
+    localized = {
+        KEY_LABELS.get(key, key): _localized_value(data.get(key))
+        for key in keys
+        if key in data
+    }
+    return json.dumps(localized, ensure_ascii=False, indent=2)
+
+
+def render_output(data: dict, output_format: str = "pretty") -> str:
+    if output_format == "json":
+        return json.dumps(data, ensure_ascii=False, default=str)
+    return compact(data)
+
+
+def repair() -> dict:
+    proxy_before = proxy_status(timeout=2)
+    service = service_manager.status()
+    codex = codex_config.ensure_enabled(True)
+    if proxy_before:
+        return {
+            "action": "already_running",
+            "installed": service.get("installed"),
+            "loaded": service.get("loaded"),
+            "needs_repair": service.get("needs_repair"),
+            "enabled": codex.get("enabled"),
+            "mode": codex.get("mode"),
+            "running": True,
+            "active_accounts": proxy_before.get("active_accounts"),
+            "total_accounts": proxy_before.get("total_accounts"),
+            "source_dir": service.get("source_dir"),
+            "runtime_dir": service.get("runtime_dir"),
+            "restart_required": False,
+        }
+    service = service_manager.ensure_running()
+    proxy = wait_for_proxy()
+    return {
+        "action": "started_or_repaired",
+        "installed": service.get("installed"),
+        "loaded": service.get("loaded"),
+        "needs_repair": service.get("needs_repair"),
+        "enabled": codex.get("enabled"),
+        "mode": codex.get("mode"),
+        "running": bool(proxy),
+        "active_accounts": proxy.get("active_accounts") if proxy else None,
+        "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "source_dir": service.get("source_dir"),
+        "runtime_dir": service.get("runtime_dir"),
+        "restart_required": service.get("restart_required"),
+    }
+
+
+def repair_open_web() -> dict:
+    result = repair()
+    subprocess.run(["open", APP_URL], check=False)
+    return result
+
+
+def repair_open_codex() -> dict:
+    result = repair()
+    subprocess.run(["open", "-a", "Codex"], check=False)
+    return result
+
+
+def restart_proxy() -> dict:
+    if not service_manager.restart():
+        service_manager.ensure_running()
+    proxy = wait_for_proxy()
+    return {
+        "running": bool(proxy),
+        "active_accounts": proxy.get("active_accounts") if proxy else None,
+        "total_accounts": proxy.get("total_accounts") if proxy else None,
+    }
+
+
+def apply_update() -> dict:
+    service = service_manager.install(sync=True)
+    proxy = wait_for_proxy()
+    return {
+        "action": "apply_update",
+        "installed": service.get("installed"),
+        "loaded": service.get("loaded"),
+        "needs_repair": service.get("needs_repair"),
+        "running": bool(proxy),
+        "active_accounts": proxy.get("active_accounts") if proxy else None,
+        "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "source_dir": service.get("source_dir"),
+        "runtime_dir": service.get("runtime_dir"),
+        "restart_required": service.get("restart_required"),
+    }
+
+
+def enable_codex_proxy() -> dict:
+    result = codex_config.ensure_enabled(True)
+    result["action"] = "enable_codex_proxy"
+    return result
+
+
+def disable_codex_proxy() -> dict:
+    result = codex_config.ensure_enabled(False)
+    result["action"] = "disable_codex_proxy"
+    return result
+
+
+def open_log() -> dict:
+    subprocess.run(["open", str(service_manager.LOG_PATH)], check=False)
+    return {"log_path": str(service_manager.LOG_PATH)}
+
+
+def show_paths() -> dict:
+    app_bundle = service_manager._app_bundle_dir()
+    source_dir = service_manager._source_dir()
+    return {
+        "action": "show_paths",
+        "source_app": str(app_bundle),
+        "app_bundle": str(app_bundle),
+        "resource_runtime_dir": str(source_dir),
+        "source_dir": str(source_dir),
+        "runtime_dir": str(service_manager.RUNTIME_DIR),
+        "accounts_dir": str(account_dir("a").parent),
+        "config_path": str(service_manager.RUNTIME_DIR / "config.json"),
+        "log_path": str(service_manager.LOG_PATH),
+        "result_path": str(service_manager.RUNTIME_DIR / "control-result.txt"),
+        "python": str(service_manager._python_executable()),
+        "pythonpath": str(service_manager._pythonpath() or ""),
+        "dependencies": [
+            "系统 Python 或 App/运行目录内置 Python",
+            "aiohttp（系统安装或运行目录 vendor）",
+            "control_actions.py",
+            "account_manager.py",
+            "codex_config.py",
+            "service_manager.py",
+            "config.py",
+            "proxy.py / proxy_core.py",
+            "static/index.html",
+            "accounts/{name}/auth.json",
+            "accounts/{name}/account.json",
+        ],
+    }
+
+
+def scan_accounts() -> dict:
+    proxy = proxy_status()
+    if proxy:
+        try:
+            request = urllib.request.Request(
+                "http://127.0.0.1:8800/api/accounts/scan",
+                data=b"",
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                rows = json.loads(response.read().decode("utf-8"))
+            return {
+                "action": "scan_accounts",
+                "running": True,
+                "total_accounts": len(rows) if isinstance(rows, list) else None,
+            }
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            pass
+    pool = AccountPool()
+    pool.scan()
+    return {
+        "action": "scan_accounts_local",
+        "running": False,
+        "total_accounts": len(pool.accounts),
+        "active_accounts": pool.active_count(),
+    }
+
+
+def list_accounts() -> dict:
+    pool = AccountPool()
+    pool.scan()
+    rows = [
+        {
+            "name": account.name,
+            "email": account.email,
+            "enabled": account.enabled,
+            "has_tokens": bool(account.access_token),
+            "auth_error": account.auth_error,
+            "rate_limited": account.is_rate_limited,
+        }
+        for account in pool.accounts
+    ]
+    return {
+        "action": "list_accounts",
+        "total_accounts": len(rows),
+        "active_accounts": pool.active_count(),
+        "accounts": rows,
+    }
+
+
+def login_command(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    target_dir = account_dir(safe_name)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    codex_cli = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
+    command = f"CODEX_HOME={target_dir} {codex_cli} login"
+    try:
+        subprocess.run(["pbcopy"], input=command, text=True, check=False)
+    except Exception:
+        pass
+    return {
+        "action": "login_command",
+        "account": safe_name,
+        "account_dir": str(target_dir),
+        "command": command,
+    }
+
+
+def start_login(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    target_dir = account_dir(safe_name)
+    auth_path = target_dir / "auth.json"
+    if auth_path.exists():
+        return {"action": "start_login", "account": safe_name, "error": "account already has auth.json"}
+
+    codex_cli = find_codex_cli()
+    if not codex_cli:
+        return {"action": "start_login", "account": safe_name, "error": "not found: codex"}
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    command = f"CODEX_HOME={target_dir} {codex_cli} login"
+    log_path = service_manager.RUNTIME_DIR / "login.log"
+    env = {**os.environ, "CODEX_HOME": str(target_dir)}
+    with open(log_path, "a") as log_file:
+        log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] starting login for {safe_name}\n")
+        process = subprocess.Popen(
+            [codex_cli, "login"],
+            cwd=str(service_manager.RUNTIME_DIR),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    try:
+        subprocess.run(["pbcopy"], input=command, text=True, check=False)
+    except Exception:
+        pass
+    return {
+        "action": "login_started",
+        "account": safe_name,
+        "account_dir": str(target_dir),
+        "command": command,
+        "log_path": str(log_path),
+        "pid": process.pid,
+        "started": True,
+    }
+
+
+def import_current(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if not CODEX_AUTH_PATH.exists():
+        return {"action": "import_current", "account": safe_name, "error": f"not found: {CODEX_AUTH_PATH}"}
+    target_dir = account_dir(safe_name)
+    auth_path = target_dir / "auth.json"
+    if auth_path.exists():
+        return {"action": "import_current", "account": safe_name, "error": "account already has auth.json"}
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(CODEX_AUTH_PATH, auth_path)
+    scan_accounts()
+    return {
+        "action": "import_current",
+        "account": safe_name,
+        "account_dir": str(target_dir),
+    }
+
+
+def load_account(name: str) -> Account:
+    safe_name = validate_account_name(name)
+    target_dir = account_dir(safe_name)
+    account = Account(safe_name, target_dir / "auth.json")
+    account.load()
+    account.load_meta()
+    return account
+
+
+def toggle_account(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if proxy_status():
+        result = fetch_api(f"/api/accounts/{safe_name}/toggle", method="PUT")
+        if isinstance(result, dict) and not result.get("error"):
+            return {
+                "action": "toggle_account",
+                "running": True,
+                "account": safe_name,
+                "enabled": result.get("enabled"),
+            }
+    account = load_account(safe_name)
+    account.enabled = not account.enabled
+    account.save_meta()
+    return {
+        "action": "toggle_account_local",
+        "running": False,
+        "account": safe_name,
+        "enabled": account.enabled,
+    }
+
+
+def delete_account(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if proxy_status():
+        result = fetch_api(f"/api/accounts/{safe_name}", method="DELETE")
+        if isinstance(result, dict) and not result.get("error"):
+            return {
+                "action": "delete_account",
+                "running": True,
+                "deleted": result.get("deleted") or safe_name,
+                "trashed_to": result.get("trashed_to"),
+            }
+
+    target_dir = account_dir(safe_name)
+    if not target_dir.exists():
+        return {
+            "action": "delete_account_local",
+            "running": False,
+            "account": safe_name,
+            "error": "account not found",
+        }
+
+    trash_dir = account_dir("a").parent / ".trash"
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    trashed = trash_dir / f"{safe_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    suffix = 1
+    while trashed.exists():
+        trashed = trash_dir / f"{safe_name}-{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
+        suffix += 1
+    shutil.move(str(target_dir), str(trashed))
+    running = bool(proxy_status())
+    if running:
+        fetch_api("/api/accounts/scan", method="POST")
+    return {
+        "action": "delete_account_local",
+        "running": running,
+        "deleted": safe_name,
+        "trashed_to": str(trashed),
+    }
+
+
+def refresh_token(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if proxy_status():
+        result = fetch_api(f"/api/accounts/{safe_name}/refresh", method="POST", timeout=45)
+        if isinstance(result, dict) and not result.get("error"):
+            account = result.get("account") or {}
+            return {
+                "action": "refresh_token",
+                "running": True,
+                "account": safe_name,
+                "refreshed": result.get("refreshed"),
+                "enabled": account.get("enabled"),
+                "auth_error": account.get("auth_error"),
+            }
+    account = load_account(safe_name)
+    ok = asyncio.run(account.refresh())
+    return {
+        "action": "refresh_token_local",
+        "running": False,
+        "account": safe_name,
+        "refreshed": ok,
+        "enabled": account.enabled,
+        "auth_error": account.auth_error,
+    }
+
+
+def clear_cooldown(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if not proxy_status():
+        return {
+            "action": "clear_cooldown",
+            "running": False,
+            "account": safe_name,
+            "error": "proxy is offline; cooldown is in-memory and clears when the proxy restarts",
+        }
+    result = fetch_api(f"/api/accounts/{safe_name}/cooldown/clear", method="PUT")
+    if isinstance(result, dict) and not result.get("error"):
+        return {
+            "action": "clear_cooldown",
+            "running": True,
+            "account": safe_name,
+            "enabled": result.get("enabled"),
+        }
+    return {
+        "action": "clear_cooldown",
+        "running": True,
+        "account": safe_name,
+        "error": (result or {}).get("error") if isinstance(result, dict) else "request failed",
+    }
+
+
+def clear_auth_error(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    if proxy_status():
+        result = fetch_api(f"/api/accounts/{safe_name}/auth-error/clear", method="PUT")
+        if isinstance(result, dict) and not result.get("error"):
+            return {
+                "action": "clear_auth_error",
+                "running": True,
+                "account": safe_name,
+                "enabled": result.get("enabled"),
+                "auth_error": result.get("auth_error"),
+            }
+
+    target_dir = account_dir(safe_name)
+    auth_path = target_dir / "auth.json"
+    if not auth_path.exists():
+        return {
+            "action": "clear_auth_error_local",
+            "running": False,
+            "account": safe_name,
+            "error": "account not found",
+        }
+    account = Account(safe_name, auth_path)
+    account.load()
+    account.load_meta()
+    previous = account.auth_error
+    account.auth_error = ""
+    account.enabled = True
+    account.save_meta()
+
+    running = bool(proxy_status())
+    if running:
+        fetch_api("/api/accounts/scan", method="POST")
+    return {
+        "action": "clear_auth_error_local",
+        "running": running,
+        "account": safe_name,
+        "enabled": account.enabled,
+        "auth_error": account.auth_error,
+        "previous_auth_error": previous,
+    }
+
+
+def status() -> dict:
+    service = service_manager.status()
+    codex = codex_config.status()
+    proxy = proxy_status()
+    cfg = config.load()
+    return {
+        "installed": service.get("installed"),
+        "loaded": service.get("loaded"),
+        "needs_repair": service.get("needs_repair"),
+        "enabled": codex.get("enabled"),
+        "mode": codex.get("mode"),
+        "strategy": cfg.get("rotation_strategy"),
+        "running": bool(proxy),
+        "active_accounts": proxy.get("active_accounts") if proxy else None,
+        "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "source_dir": service.get("source_dir"),
+        "runtime_dir": service.get("runtime_dir"),
+    }
+
+
+def set_rotation_strategy(strategy: str) -> dict:
+    if strategy not in {"round_robin", "most_available"}:
+        return {
+            "action": "set_rotation_strategy",
+            "error": "rotation_strategy must be round_robin or most_available",
+            "strategy": strategy,
+        }
+    cfg = config.load()
+    previous = cfg.get("rotation_strategy")
+    cfg["rotation_strategy"] = strategy
+    config.save(cfg)
+    return {
+        "action": "set_rotation_strategy",
+        "strategy": strategy,
+        "previous_strategy": previous,
+        "changed": previous != strategy,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "action",
+        choices=(
+            "status",
+            "repair",
+            "repair-open-web",
+            "repair-open-codex",
+            "restart-proxy",
+            "apply-update",
+            "enable-codex-proxy",
+            "disable-codex-proxy",
+            "open-log",
+            "show-paths",
+            "scan-accounts",
+            "list-accounts",
+            "login-command",
+            "start-login",
+            "import-current",
+            "toggle-account",
+            "delete-account",
+            "refresh-token",
+            "clear-cooldown",
+            "clear-auth-error",
+            "set-rotation-strategy",
+        ),
+    )
+    parser.add_argument("--name", default="")
+    parser.add_argument("--strategy", default="")
+    parser.add_argument("--format", choices=("pretty", "json"), default="pretty")
+    args = parser.parse_args()
+
+    actions = {
+        "status": status,
+        "repair": repair,
+        "repair-open-web": repair_open_web,
+        "repair-open-codex": repair_open_codex,
+        "restart-proxy": restart_proxy,
+        "apply-update": apply_update,
+        "enable-codex-proxy": enable_codex_proxy,
+        "disable-codex-proxy": disable_codex_proxy,
+        "open-log": open_log,
+        "show-paths": show_paths,
+        "scan-accounts": scan_accounts,
+        "list-accounts": list_accounts,
+        "login-command": lambda: login_command(args.name),
+        "start-login": lambda: start_login(args.name),
+        "import-current": lambda: import_current(args.name),
+        "toggle-account": lambda: toggle_account(args.name),
+        "delete-account": lambda: delete_account(args.name),
+        "refresh-token": lambda: refresh_token(args.name),
+        "clear-cooldown": lambda: clear_cooldown(args.name),
+        "clear-auth-error": lambda: clear_auth_error(args.name),
+        "set-rotation-strategy": lambda: set_rotation_strategy(args.strategy),
+    }
+    print(render_output(actions[args.action](), args.format))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,104 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+APP="$ROOT/Codex Proxy Control.app"
+RESOURCES="$APP/Contents/Resources"
+RUNTIME="$RESOURCES/runtime"
+VENDOR="$RUNTIME/vendor"
+PYTHON="${PYTHON:-/usr/bin/python3}"
+PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
+SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
+
+mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
+
+if [ -f "$APP/Contents/MacOS/Codex Proxy Control" ] && file "$APP/Contents/MacOS/Codex Proxy Control" | grep -q "shell script"; then
+  cp "$APP/Contents/MacOS/Codex Proxy Control" "$RESOURCES/fallback_menu.zsh"
+  chmod +x "$RESOURCES/fallback_menu.zsh"
+fi
+
+for file in \
+  account_manager.py \
+  codex_config.py \
+  config.py \
+  config.json \
+  control_actions.py \
+  control_panel.py \
+  login_manager.py \
+  proxy.py \
+  proxy_core.py \
+  quota_tracker.py \
+  requirements.txt \
+  service_manager.py
+do
+  cp "$ROOT/$file" "$RUNTIME/$file"
+done
+
+rm -rf "$RUNTIME/static"
+cp -R "$ROOT/static" "$RUNTIME/static"
+
+if [ -d "$PYTHON_FRAMEWORK" ]; then
+  rm -rf "$RUNTIME/python"
+  mkdir -p "$RUNTIME/python/bin"
+  ditto --norsrc "$PYTHON_FRAMEWORK" "$RUNTIME/python/Python3.framework"
+  cat > "$RUNTIME/python/bin/python3" <<'PYSH'
+#!/bin/zsh
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$ROOT/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python" "$@"
+PYSH
+  chmod +x "$RUNTIME/python/bin/python3"
+fi
+
+"$PYTHON" - <<'PY' "$VENDOR"
+import importlib.util
+import shutil
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+target.mkdir(parents=True, exist_ok=True)
+packages = [
+    "aiohttp",
+    "aiosignal",
+    "async_timeout",
+    "attr",
+    "attrs",
+    "frozenlist",
+    "idna",
+    "multidict",
+    "propcache",
+    "typing_extensions",
+    "yarl",
+]
+for package in packages:
+    spec = importlib.util.find_spec(package)
+    if not spec or not spec.origin:
+        continue
+    src = Path(spec.origin)
+    if src.name == "__init__.py":
+        src = src.parent
+    dst = target / src.name
+    if dst.exists():
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        else:
+            dst.unlink()
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
+PY
+
+clang -fobjc-arc -framework Cocoa "$ROOT/ControlApp.m" -o "$APP/Contents/MacOS/Codex Proxy Control"
+chmod +x "$APP/Contents/MacOS/Codex Proxy Control"
+xattr -cr "$APP"
+xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+
+echo "Built $APP"
+
+rm -rf "$SIGNED_APP"
+ditto --norsrc "$APP" "$SIGNED_APP"
+codesign --force --deep --sign - "$SIGNED_APP" >/dev/null
+codesign --verify --deep --strict "$SIGNED_APP"
+echo "Signed copy: $SIGNED_APP"

@@ -1,351 +1,262 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Codex 账号池代理管理</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Proxy Status</title>
 <style>
-:root{--bg:#0f1117;--surface:#1a1d27;--border:#2a2d3a;--text:#e1e4eb;--muted:#8b8fa5;--accent:#6c8aff;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--radius:8px}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.5}
-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:8px}
-header h1{font-size:18px;font-weight:600}
-header .dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-nav{display:flex;gap:4px;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
-nav button{padding:8px 20px;border:none;border-radius:var(--radius);cursor:pointer;font-size:14px;background:transparent;color:var(--muted);transition:.15s}
-nav button:hover{color:var(--text);background:rgba(255,255,255,.05)}
-nav button.active{background:var(--accent);color:#fff}
-main{padding:24px;max-width:960px;margin:0 auto}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
-.card h3{font-size:15px;margin-bottom:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
-.stat{background:var(--bg);border-radius:var(--radius);padding:16px;text-align:center}
-.stat .num{font-size:28px;font-weight:700}
-.stat .label{font-size:12px;color:var(--muted);margin-top:4px}
+:root{color-scheme:light dark;--bg:#f7f7f3;--panel:#ffffff;--text:#202124;--muted:#6b6f76;--line:#deded8;--green:#16794c;--amber:#9a6200;--red:#b3261e;--blue:#0b57d0}
+@media (prefers-color-scheme:dark){:root{--bg:#171816;--panel:#20211f;--text:#f2f2ee;--muted:#a6aaa3;--line:#353733;--green:#73d19a;--amber:#e5b454;--red:#ff8a80;--blue:#8ab4f8}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1120px;margin:0 auto;padding:28px 18px 40px}
+header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:18px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:16px;margin:0 0 12px}
+p{margin:0;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+.num{font-size:26px;font-weight:700;margin-bottom:2px}
+.label{color:var(--muted);font-size:12px}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;padding:10px 12px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
-td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
-.badge-on{background:rgba(74,222,128,.15);color:var(--green)}
-.badge-off{background:rgba(248,113,113,.15);color:var(--red)}
-.badge-cool{background:rgba(251,191,36,.15);color:var(--amber)}
-.btn{padding:8px 16px;border:none;border-radius:var(--radius);cursor:pointer;font-size:13px;font-weight:500;transition:.15s;display:inline-flex;align-items:center;gap:6px}
-.btn-primary{background:var(--accent);color:#fff}
-.btn-primary:hover{opacity:.85}
-.btn-danger{background:rgba(248,113,113,.15);color:var(--red)}
-.btn-danger:hover{background:rgba(248,113,113,.25)}
-.btn-sm{padding:4px 10px;font-size:12px}
-.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
-.btn-ghost:hover{color:var(--text);border-color:var(--muted)}
-.flex{display:flex;gap:8px;align-items:center}
-.mb{margin-bottom:16px}
-.mr{margin-right:8px}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
-.modal-overlay.show{display:flex}
-.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;min-width:480px;max-width:640px}
-.modal h3{margin-bottom:12px}
-.modal code{display:block;background:var(--bg);padding:16px;border-radius:var(--radius);font-size:14px;margin:12px 0;word-break:break-all;user-select:all}
-.progress-bar{width:100%;height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:4px}
-.progress-fill{height:100%;border-radius:3px;transition:.3s}
-.progress-low{background:var(--accent)}
-.progress-mid{background:var(--amber)}
-.progress-high{background:var(--red)}
-.form-group{margin-bottom:14px}
-.form-group label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
-.form-group input,.form-group select{width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px}
-.form-group input:focus{outline:none;border-color:var(--accent)}
-.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--radius);font-size:14px;z-index:200;animation:slideUp .3s;max-width:360px}
-.toast-ok{background:#166534;color:var(--green);border:1px solid var(--green)}
-.toast-err{background:#7f1d1d;color:var(--red);border:1px solid var(--red)}
-@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
-.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.empty{text-align:center;padding:40px;color:var(--muted)}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 8px;vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.ok{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}.muted{color:var(--muted)}
+.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:12px}
+.bar{width:88px;height:6px;background:var(--line);border-radius:999px;overflow:hidden;margin:4px 0}
+.fill{height:100%;border-radius:999px;background:var(--green)}
+.fill.warn{background:var(--amber)}.fill.bad{background:var(--red)}
+.sub{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.toolbar{display:flex;gap:8px;align-items:center}
+button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:8px 11px;cursor:pointer}
+button:hover{border-color:var(--blue)}
+@media(max-width:760px){header{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}}
 </style>
 </head>
 <body>
-
-<header>
-  <div class="dot" id="status-dot"></div>
-  <h1>Codex 账号池代理管理</h1>
-</header>
-
-<nav>
-  <button class="active" data-tab="dashboard">仪表盘</button>
-  <button data-tab="accounts">账号管理</button>
-  <button data-tab="settings">设置</button>
-</nav>
-
 <main>
-<!-- ====== DASHBOARD ====== -->
-<section id="tab-dashboard">
-  <div class="card"><h3>概览</h3>
-    <div class="stats">
-      <div class="stat"><div class="num" id="stat-total">—</div><div class="label">账号总数</div></div>
-      <div class="stat"><div class="num" id="stat-active">—</div><div class="label">活跃</div></div>
-      <div class="stat"><div class="num" id="stat-limited">—</div><div class="label">限流中</div></div>
-      <div class="stat"><div class="num" id="stat-strategy">—</div><div class="label">轮换策略</div></div>
+  <header>
+    <div>
+      <h1>Codex Proxy Status</h1>
+      <p>Web只做状态诊断。账号、服务和 Codex 配置请用本地 Codex Proxy Control App 管理。</p>
     </div>
-  </div>
-  <div class="card" id="quota-summary-card"><h3>配额总览</h3>
-    <div id="quota-summary" class="empty">加载中…</div>
-  </div>
-</section>
-
-<!-- ====== ACCOUNTS ====== -->
-<section id="tab-accounts" style="display:none">
-  <div class="flex mb">
-    <button class="btn btn-primary" onclick="openAddModal()">+ 添加账号</button>
-    <button class="btn btn-ghost" onclick="scanAccounts()">&#x21bb; 重新扫描</button>
-  </div>
-  <div class="card">
-    <table>
-      <thead><tr><th>名称</th><th>邮箱</th><th>状态</th><th>5小时</th><th>7天</th><th style="width:180px">操作</th></tr></thead>
-      <tbody id="accounts-tbody"><tr><td colspan="6" class="empty">还没有账号，点击"添加账号"开始。</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
-<!-- ====== SETTINGS ====== -->
-<section id="tab-settings" style="display:none">
-  <div class="card">
-    <h3>代理配置</h3>
-    <div class="form-group"><label>端口</label><input type="number" id="cfg-port" value="8800"></div>
-    <div class="form-group"><label>限流冷却时间（秒）</label><input type="number" id="cfg-cooldown" value="60"></div>
-    <div class="form-group"><label>轮换策略</label>
-      <select id="cfg-strategy">
-        <option value="round_robin">轮询</option>
-        <option value="least_used">最少使用</option>
-      </select>
+    <div class="toolbar">
+      <button id="refresh-button" onclick="refreshQuota()">刷新</button>
+      <span id="refresh-status" class="sub">自动刷新中</span>
     </div>
-    <div class="form-group"><label>最大重试次数</label><input type="number" id="cfg-retries" value="10"></div>
-    <div class="form-group"><label>配额刷新间隔（秒）</label><input type="number" id="cfg-quota" value="300"></div>
-    <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
-  </div>
-</section>
+  </header>
+
+  <section class="grid">
+    <div class="card"><div class="num" id="running">-</div><div class="label">代理状态</div></div>
+    <div class="card"><div class="num" id="accounts">-</div><div class="label">可用账号 / 总账号</div></div>
+    <div class="card"><div class="num" id="strategy">-</div><div class="label">选择策略</div></div>
+    <div class="card"><div class="num" id="requests">-</div><div class="label">总请求</div></div>
+  </section>
+
+  <section class="card">
+    <h2>账号状态</h2>
+    <div id="account-list" class="muted">加载中...</div>
+  </section>
+
+  <section class="card" style="margin-top:12px">
+    <h2>最近请求</h2>
+    <div id="recent" class="muted">加载中...</div>
+  </section>
+
+  <section class="card" style="margin-top:12px">
+    <h2>最近错误</h2>
+    <div id="errors" class="muted">加载中...</div>
+  </section>
 </main>
 
-<!-- ====== ADD ACCOUNT MODAL ====== -->
-<div class="modal-overlay" id="add-modal">
-  <div class="modal">
-    <h3>添加新账号</h3>
-    <div class="form-group"><label>账号名称</label><input type="text" id="new-account-name" placeholder="例如：account-b" style="width:100%"></div>
-    <button class="btn btn-primary mb" onclick="addAccount()">生成登录命令</button>
-    <div id="command-area" style="display:none">
-      <p style="font-size:13px;color:var(--muted)">在终端中执行以下命令，完成后点 <strong>重新扫描</strong>：</p>
-      <code id="login-command"></code>
-      <p style="font-size:12px;color:var(--amber)">这将打开浏览器进行 ChatGPT 登录。请使用<strong>不同的</strong> OpenAI 账号。</p>
-    </div>
-    <div class="flex" style="justify-content:flex-end;margin-top:16px">
-      <button class="btn btn-ghost" onclick="closeAddModal()">关闭</button>
-    </div>
-  </div>
-</div>
-
 <script>
-const API = '';
-let statusTimer = null;
+async function fetchJSON(path, options = {}) {
+  const response = await fetch(path, { cache: 'no-store', ...options });
+  const text = await response.text();
+  try { return JSON.parse(text); } catch { return { error: text || response.statusText }; }
+}
 
-async function fetchJSON(url, opts = {}) {
+async function refreshAll() {
+  const [status, accounts, quota] = await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/accounts'),
+    fetchJSON('/api/quota'),
+  ]);
+  renderStatus(status);
+  renderAccounts(Array.isArray(accounts) ? accounts : [], quota && !quota.error ? quota : {});
+}
+
+async function refreshQuota() {
+  const button = document.getElementById('refresh-button');
+  const status = document.getElementById('refresh-status');
+  button.disabled = true;
+  button.textContent = '刷新中...';
+  status.textContent = '正在拉取最新额度...';
   try {
-    const r = await fetch(API + url, opts);
-    if (!r.ok) throw new Error(`${r.status}`);
-    return await r.json();
-  } catch (e) {
-    console.error(url, e);
-    return null;
+    const result = await fetchJSON('/api/quota/refresh', { method: 'POST' });
+    await refreshAll();
+    const refreshed = Object.values(result.accounts || {}).filter(item => item.refreshed).length;
+    status.textContent = refreshed ? `已刷新 ${refreshed} 个账号：${new Date().toLocaleTimeString()}` : '刷新完成，但没有新数据';
+  } finally {
+    button.disabled = false;
+    button.textContent = '刷新';
   }
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────
-document.querySelectorAll('nav button').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const tab = btn.dataset.tab;
-    document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
-    document.getElementById('tab-' + tab).style.display = '';
-    if (tab === 'accounts') refreshAccounts();
-    if (tab === 'dashboard') refreshDashboard();
-    if (tab === 'settings') loadSettings();
-  });
-});
+function renderStatus(status) {
+  document.getElementById('running').textContent = status && !status.error ? '在线' : '异常';
+  document.getElementById('running').className = status && !status.error ? 'num ok' : 'num bad';
+  document.getElementById('accounts').textContent = `${status.active_accounts ?? '-'} / ${status.total_accounts ?? '-'}`;
+  document.getElementById('strategy').textContent = status.strategy || '-';
+  document.getElementById('requests').textContent = status.stats?.total_requests ?? '-';
 
-// ── Dashboard ─────────────────────────────────────────────────────
-async function refreshDashboard() {
-  const status = await fetchJSON('/api/status');
-  if (status) {
-    document.getElementById('stat-total').textContent = status.total_accounts;
-    document.getElementById('stat-active').textContent = status.active_accounts;
-    document.getElementById('stat-limited').textContent = (status.total_accounts || 0) - (status.active_accounts || 0);
-    document.getElementById('stat-strategy').textContent = status.strategy;
-    document.getElementById('status-dot').style.background = status.running ? 'var(--green)' : 'var(--red)';
-  }
-
-  const quota = await fetchJSON('/api/quota');
-  const el = document.getElementById('quota-summary');
-  if (!quota || !Object.keys(quota).length) {
-    el.innerHTML = '<div class="empty">暂无配额数据，使用 Codex 后将在此显示用量。</div>';
-    return;
-  }
-  let html = '<table><thead><tr><th>账号</th><th>5小时用量</th><th>7天用量</th><th>订阅类型</th></tr></thead><tbody>';
-  for (const [name, data] of Object.entries(quota)) {
-    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="3" style="color:var(--muted)">暂无数据</td></tr>`; continue; }
-    const rl = data.rate_limit || {};
-    const pw = rl.primary_window || {};
-    const sw = rl.secondary_window || {};
-    const d5h = pw.used_percent != null ? pw.used_percent : (data['5h_usage'] || 0);
-    const d7d = sw.used_percent != null ? sw.used_percent : (data.weekly_usage || 0);
-    const plan = data.plan_type || '—';
-    html += `<tr>
-      <td><strong>${esc(name)}</strong></td>
-      <td>${usageBar(d5h,100)} ${d5h}%</td>
-      <td>${usageBar(d7d,100)} ${d7d}%</td>
-      <td style="color:var(--muted)">${esc(plan)}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
-}
-
-function usageBar(used, limit) {
-  const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
-  let cls = 'progress-low';
-  if (pct > 80) cls = 'progress-high';
-  else if (pct > 50) cls = 'progress-mid';
-  return `<div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
-}
-
-// ── Accounts ──────────────────────────────────────────────────────
-async function refreshAccounts() {
-  const accounts = await fetchJSON('/api/accounts');
-  const tbody = document.getElementById('accounts-tbody');
-  if (!accounts || !accounts.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">还没有账号，点击"添加账号"开始。</td></tr>';
-    return;
-  }
-  const quota = await fetchJSON('/api/quota') || {};
-  tbody.innerHTML = accounts.map(a => {
-    let statusHTML = '';
-    if (a.rate_limited) statusHTML += `<span class="badge badge-cool mr">限流中</span>`;
-    statusHTML += a.enabled ? `<span class="badge badge-on">活跃</span>` : `<span class="badge badge-off">已禁用</span>`;
-    const q = quota[a.name] || {};
-    const rl = q.rate_limit || {};
-    const pw = rl.primary_window || {};
-    const sw = rl.secondary_window || {};
-    const d5h = pw.used_percent != null ? pw.used_percent : (q['5h_usage'] || 0);
-    const d7d = sw.used_percent != null ? sw.used_percent : (q.weekly_usage || 0);
-    return `<tr>
-      <td><strong>${esc(a.name)}</strong></td>
-      <td style="color:var(--muted)">${esc(a.email || '—')}</td>
-      <td>${statusHTML}</td>
-      <td>${usageBar(d5h, 100)} <small>${d5h}%</small></td>
-      <td>${usageBar(d7d, 100)} <small>${d7d}%</small></td>
-      <td class="flex">
-        <button class="btn btn-sm btn-ghost" onclick="toggleAccount('${esc(a.name)}')">${a.enabled ? '禁用' : '启用'}</button>
-        <button class="btn btn-sm btn-ghost" onclick="refreshToken('${esc(a.name)}')">刷新令牌</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${esc(a.name)}')">删除</button>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
-async function toggleAccount(name) {
-  await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/toggle`, { method: 'PUT' });
-  refreshAccounts();
-}
-
-async function refreshToken(name) {
-  toast('正在刷新令牌…');
-  const r = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/refresh`, { method: 'POST' });
-  if (r && r.refreshed) toast('令牌刷新成功', 'ok');
-  else toast('令牌刷新失败', 'err');
-  refreshAccounts();
-}
-
-async function deleteAccount(name) {
-  if (!confirm(`确定删除账号"${name}"？这将移除其所有认证令牌。`)) return;
-  await fetchJSON(`/api/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
-  refreshAccounts();
-}
-
-async function scanAccounts() {
-  toast('正在扫描…');
-  await fetchJSON('/api/accounts/scan', { method: 'POST' });
-  refreshAccounts();
-  refreshDashboard();
-  toast('扫描完成', 'ok');
-}
-
-// ── Add Account Modal ─────────────────────────────────────────────
-function openAddModal() {
-  document.getElementById('add-modal').classList.add('show');
-  document.getElementById('command-area').style.display = 'none';
-  document.getElementById('new-account-name').value = '';
-}
-
-function closeAddModal() {
-  document.getElementById('add-modal').classList.remove('show');
-}
-
-async function addAccount() {
-  const name = document.getElementById('new-account-name').value.trim();
-  if (!name) { toast('请输入账号名称', 'err'); return; }
-  const r = await fetchJSON('/api/accounts/add', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  });
-  if (r && r.command) {
-    document.getElementById('login-command').textContent = r.command;
-    document.getElementById('command-area').style.display = '';
-    toast('命令已生成', 'ok');
+  const rows = (status.recent_requests || []).slice(0, 12);
+  if (!rows.length) {
+    document.getElementById('recent').innerHTML = '<p>暂无请求记录。</p>';
   } else {
-    toast(r?.error || '操作失败', 'err');
+    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>路径</th><th>ID</th></tr></thead><tbody>${
+      rows.map(row => `<tr>
+        <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
+        <td>${esc(row.account || '-')}</td>
+        <td>${statusLabel(row.status)}</td>
+        <td><code>${esc(row.path || '-')}</code></td>
+        <td><code>${esc(row.request_id || '-')}</code></td>
+      </tr>`).join('')
+    }</tbody></table>`;
   }
+
+  const errors = (status.recent_errors || []).slice(0, 8);
+  if (!errors.length) {
+    document.getElementById('errors').innerHTML = '<p>暂无上游或流式错误。</p>';
+    return;
+  }
+  document.getElementById('errors').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>路径</th><th>错误</th><th>ID</th></tr></thead><tbody>${
+    errors.map(row => `<tr>
+      <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
+      <td>${esc(row.account || '-')}</td>
+      <td><code>${esc(row.path || '-')}</code></td>
+      <td>${esc(row.error || '-')}</td>
+      <td><code>${esc(row.request_id || '-')}</code></td>
+    </tr>`).join('')
+  }</tbody></table>`;
 }
 
-// ── Settings ──────────────────────────────────────────────────────
-async function loadSettings() {
-  const cfg = await fetchJSON('/api/config');
-  if (!cfg) return;
-  document.getElementById('cfg-port').value = cfg.port || 8800;
-  document.getElementById('cfg-cooldown').value = cfg.rate_limit_cooldown || 60;
-  document.getElementById('cfg-strategy').value = cfg.rotation_strategy || 'round_robin';
-  document.getElementById('cfg-retries').value = cfg.max_retries || 10;
-  document.getElementById('cfg-quota').value = cfg.quota_refresh_interval || 300;
+function renderAccounts(accounts, quota) {
+  if (!accounts.length) {
+    document.getElementById('account-list').innerHTML = '<p>未发现账号。请用本地 App 生成登录命令或导入当前账号。</p>';
+    return;
+  }
+  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
+    accounts.map(account => {
+      const q = quota?.[account.name] || null;
+      const summary = quotaSummary(q);
+      return `<tr>
+      <td><strong>${esc(account.name || '-')}</strong></td>
+      <td>${esc(account.email || '-')}</td>
+      <td>${accountState(account)}</td>
+      <td>${quotaCell(summary.fiveHour)}</td>
+      <td>${quotaCell(summary.sevenDay)}</td>
+      <td>${refreshCell(summary)}</td>
+      <td>${account.expires_at ? esc(new Date(account.expires_at * 1000).toLocaleString()) : '-'}</td>
+    </tr>`;
+    }).join('')
+  }</tbody></table>`;
 }
 
-async function saveSettings() {
-  const cfg = {
-    port: parseInt(document.getElementById('cfg-port').value) || 8800,
-    rate_limit_cooldown: parseInt(document.getElementById('cfg-cooldown').value) || 60,
-    rotation_strategy: document.getElementById('cfg-strategy').value,
-    max_retries: parseInt(document.getElementById('cfg-retries').value) || 10,
-    quota_refresh_interval: parseInt(document.getElementById('cfg-quota').value) || 300,
+function quotaSummary(data) {
+  if (data?.error) {
+    return {
+      fiveHour: { value: null, used: null, resetAt: null, note: '刷新中' },
+      sevenDay: { value: null, used: null, resetAt: null, note: '刷新中' },
+      fetchedAt: null,
+      planType: '',
+      unavailable: true,
+    };
+  }
+  const rateLimit = data?.rate_limit || {};
+  const primary = rateLimit.primary_window || null;
+  const secondary = rateLimit.secondary_window || null;
+  const fiveHour = quotaWindow(primary, data?.['5h_usage']);
+  let sevenDay = quotaWindow(secondary, data?.weekly_usage);
+  let sevenDayNote = '';
+  if (!sevenDay.value && data && ['free', 'go'].includes(String(data.plan_type || '').toLowerCase())) {
+    sevenDay = quotaWindow(primary, data?.['5h_usage']);
+    sevenDayNote = '共享窗口';
+  }
+  return {
+    fiveHour,
+    sevenDay: { ...sevenDay, note: sevenDay.note || sevenDayNote },
+    fetchedAt: numberOrNull(data?._fetched_at),
+    planType: data?.plan_type || '',
   };
-  await fetchJSON('/api/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(cfg),
-  });
-  toast('设置已保存，重启代理后端口修改生效。', 'ok');
 }
 
-// ── Helpers ───────────────────────────────────────────────────────
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function toast(msg, type = 'ok') {
-  const el = document.createElement('div');
-  el.className = 'toast toast-' + type;
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+function quotaWindow(windowData, fallbackUsed) {
+  const used = numberOrNull(windowData?.used_percent ?? fallbackUsed);
+  const remaining = used == null ? null : clamp(100 - used, 0, 100);
+  return {
+    value: remaining,
+    used,
+    resetAt: numberOrNull(windowData?.reset_at),
+    note: '',
+  };
 }
 
-// ── Init ──────────────────────────────────────────────────────────
-refreshDashboard();
-statusTimer = setInterval(refreshDashboard, 30000);
+function quotaCell(item) {
+  if (item.value == null) return `<span class="muted">${esc(item.note || '无数据')}</span>`;
+  const cls = item.value <= 5 ? 'bad' : item.value <= 25 ? 'warn' : '';
+  const used = item.used == null ? '' : `<span class="sub">已用 ${formatPercent(item.used)}</span>`;
+  const note = item.note ? `<span class="sub">${esc(item.note)}</span>` : '';
+  return `<strong>${formatPercent(item.value)}</strong><div class="bar"><div class="fill ${cls}" style="width:${clamp(item.value, 0, 100)}%"></div></div>${used}${note}`;
+}
+
+function refreshCell(summary) {
+  if (summary.unavailable) return '<span class="muted">刷新中</span>';
+  const rows = [];
+  if (summary.fiveHour.resetAt) rows.push(`5h: ${formatTime(summary.fiveHour.resetAt)}`);
+  if (summary.sevenDay.resetAt) rows.push(`7d: ${formatTime(summary.sevenDay.resetAt)}`);
+  if (summary.fetchedAt) rows.push(`数据: ${formatTime(summary.fetchedAt)}`);
+  return rows.length ? rows.map(row => `<span class="sub">${esc(row)}</span>`).join('') : '<span class="muted">无数据</span>';
+}
+
+function statusLabel(code) {
+  const value = Number(code);
+  const cls = value >= 500 ? 'bad' : value >= 400 ? 'warn' : 'ok';
+  return `<span class="${cls}">${esc(code ?? '-')}</span>`;
+}
+
+function accountState(account) {
+  if (account.auth_error) return `<span class="bad">${esc(account.auth_error)}</span>`;
+  if (!account.has_tokens) return '<span class="bad">缺少 token</span>';
+  if (!account.enabled) return '<span class="warn">已禁用</span>';
+  if (account.rate_limited) return `<span class="warn">${esc(account.cooldown_reason || '冷却中')}</span>`;
+  return '<span class="ok">可用</span>';
+}
+
+function esc(value) {
+  return String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function formatPercent(value) {
+  return `${Math.round(value)}%`;
+}
+
+function formatTime(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+refreshAll();
+setInterval(refreshAll, 10000);
 </script>
 </body>
 </html>
