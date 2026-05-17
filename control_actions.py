@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import time
@@ -23,6 +24,8 @@ APP_URL = "http://127.0.0.1:8800/app"
 STATUS_URL = "http://127.0.0.1:8800/api/status"
 HEALTH_URL = "http://127.0.0.1:8800/api/health"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
+CODEX_APP_PATH = Path("/Applications/Codex.app")
+CODEX_CLI_INSTALL_HINT = "请先安装 Codex App，或确保 codex 命令在 PATH 中。"
 
 KEY_LABELS = {
     "action": "动作",
@@ -58,6 +61,12 @@ KEY_LABELS = {
     "result_path": "结果文件",
     "python": "Python",
     "pythonpath": "Python 包路径",
+    "codex_cli_found": "Codex CLI 已找到",
+    "codex_cli": "Codex CLI",
+    "codex_app_found": "Codex App 已找到",
+    "codex_cli_error": "Codex 依赖提示",
+    "runtime_exists": "运行目录已存在",
+    "resource_runtime_exists": "App 内置资源已存在",
     "dependencies": "依赖项",
     "name": "名称",
     "email": "邮箱",
@@ -98,6 +107,8 @@ VALUE_LABELS = {
     "proxy is offline; cooldown is in-memory and clears when the proxy restarts": (
         "代理离线；冷却状态只保存在内存中，代理重启后会自然清除"
     ),
+    "codex_cli_missing": "未找到 Codex CLI",
+    "codex_app_missing": "未找到 Codex App",
 }
 
 
@@ -200,6 +211,12 @@ def compact(data: dict) -> str:
         "result_path",
         "python",
         "pythonpath",
+        "codex_cli_found",
+        "codex_cli",
+        "codex_app_found",
+        "codex_cli_error",
+        "runtime_exists",
+        "resource_runtime_exists",
         "dependencies",
         "refreshed",
         "auth_error",
@@ -219,12 +236,39 @@ def render_output(data: dict, output_format: str = "pretty") -> str:
     return compact(data)
 
 
+def codex_dependency_status() -> dict:
+    codex_cli = find_codex_cli()
+    cli_found = bool(codex_cli)
+    app_found = CODEX_APP_PATH.exists()
+    return {
+        "codex_cli_found": cli_found,
+        "codex_cli": codex_cli or "",
+        "codex_app_found": app_found,
+        "codex_cli_error": "" if cli_found else CODEX_CLI_INSTALL_HINT,
+    }
+
+
+def runtime_status(source_dir: Optional[str] = None) -> dict:
+    source = Path(source_dir).expanduser() if source_dir else service_manager._source_dir()
+    return {
+        "runtime_exists": service_manager.RUNTIME_DIR.exists(),
+        "resource_runtime_exists": source.exists(),
+    }
+
+
+def with_product_status(data: dict) -> dict:
+    result = dict(data)
+    result.update(codex_dependency_status())
+    result.update(runtime_status(result.get("source_dir")))
+    return result
+
+
 def repair() -> dict:
     proxy_before = proxy_status(timeout=2)
     service = service_manager.status()
     codex = codex_config.ensure_enabled(True)
     if proxy_before:
-        return {
+        return with_product_status({
             "action": "already_running",
             "installed": service.get("installed"),
             "loaded": service.get("loaded"),
@@ -237,10 +281,10 @@ def repair() -> dict:
             "source_dir": service.get("source_dir"),
             "runtime_dir": service.get("runtime_dir"),
             "restart_required": False,
-        }
+        })
     service = service_manager.ensure_running()
     proxy = wait_for_proxy()
-    return {
+    return with_product_status({
         "action": "started_or_repaired",
         "installed": service.get("installed"),
         "loaded": service.get("loaded"),
@@ -253,7 +297,7 @@ def repair() -> dict:
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
         "restart_required": service.get("restart_required"),
-    }
+    })
 
 
 def repair_open_web() -> dict:
@@ -264,6 +308,10 @@ def repair_open_web() -> dict:
 
 def repair_open_codex() -> dict:
     result = repair()
+    if not CODEX_APP_PATH.exists():
+        result["error"] = "codex_app_missing"
+        result["codex_cli_error"] = "请先安装 Codex App，再使用“打开 Codex”。"
+        return result
     subprocess.run(["open", "-a", "Codex"], check=False)
     return result
 
@@ -316,7 +364,7 @@ def open_log() -> dict:
 def show_paths() -> dict:
     app_bundle = service_manager._app_bundle_dir()
     source_dir = service_manager._source_dir()
-    return {
+    result = {
         "action": "show_paths",
         "source_app": str(app_bundle),
         "app_bundle": str(app_bundle),
@@ -343,6 +391,7 @@ def show_paths() -> dict:
             "accounts/{name}/account.json",
         ],
     }
+    return with_product_status(result)
 
 
 def scan_accounts() -> dict:
@@ -399,7 +448,15 @@ def login_command(name: str) -> dict:
     safe_name = validate_account_name(name)
     target_dir = account_dir(safe_name)
     target_dir.mkdir(parents=True, exist_ok=True)
-    codex_cli = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
+    codex_cli = find_codex_cli()
+    if not codex_cli:
+        return {
+            "action": "login_command",
+            "account": safe_name,
+            "account_dir": str(target_dir),
+            "error": "codex_cli_missing",
+            "codex_cli_error": CODEX_CLI_INSTALL_HINT,
+        }
     command = f"CODEX_HOME={target_dir} {codex_cli} login"
     try:
         subprocess.run(["pbcopy"], input=command, text=True, check=False)
@@ -422,7 +479,12 @@ def start_login(name: str) -> dict:
 
     codex_cli = find_codex_cli()
     if not codex_cli:
-        return {"action": "start_login", "account": safe_name, "error": "not found: codex"}
+        return {
+            "action": "start_login",
+            "account": safe_name,
+            "error": "codex_cli_missing",
+            "codex_cli_error": CODEX_CLI_INSTALL_HINT,
+        }
 
     target_dir.mkdir(parents=True, exist_ok=True)
     command = f"CODEX_HOME={target_dir} {codex_cli} login"
@@ -642,7 +704,7 @@ def status() -> dict:
     codex = codex_config.status()
     proxy = proxy_status()
     cfg = config.load()
-    return {
+    return with_product_status({
         "installed": service.get("installed"),
         "loaded": service.get("loaded"),
         "needs_repair": service.get("needs_repair"),
@@ -654,7 +716,7 @@ def status() -> dict:
         "total_accounts": proxy.get("total_accounts") if proxy else None,
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
-    }
+    })
 
 
 def set_rotation_strategy(strategy: str) -> dict:

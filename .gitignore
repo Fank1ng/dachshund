@@ -1,4 +1,8 @@
 accounts/
+build/
+dist/
+Codex Proxy Control.app/
+*.dmg
 .DS_Store
 *.pyc
 __pycache__/

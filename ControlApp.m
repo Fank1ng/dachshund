@@ -347,6 +347,9 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)renderDashboardSection {
+    if ([self shouldShowSetupCard]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self setupChecklistCard]]];
+    }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self metricsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountsTableCardWithHeight:176]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:110 compact:YES]]];
@@ -383,6 +386,71 @@ static NSString *CPRelativeTime(id epochValue) {
     [row addArrangedSubview:inspector];
     [row addArrangedSubview:log];
     [inspector.widthAnchor constraintEqualToAnchor:log.widthAnchor multiplier:1.05].active = YES;
+    return row;
+}
+
+- (BOOL)shouldShowSetupCard {
+    if (!self.statusSnapshot.count) {
+        return YES;
+    }
+    if (!CPBool(self.statusSnapshot[@"resource_runtime_exists"])) {
+        return YES;
+    }
+    if (!CPBool(self.statusSnapshot[@"runtime_exists"])) {
+        return YES;
+    }
+    if (!CPBool(self.statusSnapshot[@"codex_cli_found"])) {
+        return YES;
+    }
+    if (!CPBool(self.statusSnapshot[@"installed"]) || !CPBool(self.statusSnapshot[@"loaded"])) {
+        return YES;
+    }
+    return !CPBool(self.statusSnapshot[@"enabled"]);
+}
+
+- (NSView *)setupChecklistCard {
+    NSView *card = [self cardView];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.heightAnchor constraintGreaterThanOrEqualToConstant:132].active = YES;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+
+    [stack addArrangedSubview:[self labelWithText:@"首次使用检查" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+
+    BOOL runtimeReady = CPBool(self.statusSnapshot[@"runtime_exists"]) && CPBool(self.statusSnapshot[@"resource_runtime_exists"]);
+    BOOL cliReady = CPBool(self.statusSnapshot[@"codex_cli_found"]);
+    BOOL serviceReady = CPBool(self.statusSnapshot[@"installed"]) && CPBool(self.statusSnapshot[@"loaded"]);
+    BOOL proxyReady = CPBool(self.statusSnapshot[@"enabled"]);
+    NSString *cliDetail = cliReady
+        ? CPDisplayString(self.statusSnapshot[@"codex_cli"])
+        : CPDisplayString(self.statusSnapshot[@"codex_cli_error"]);
+    NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动/修复”安装并启动";
+    NSString *proxyDetail = proxyReady ? @"Codex 已配置为代理模式" : @"点击“启用代理”写入 Codex 配置";
+
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"运行资源" detail:runtimeReady ? @"运行目录已准备" : @"正在准备或缺少 App 内置资源" ok:runtimeReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"Codex" detail:cliDetail ok:cliReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"后台服务" detail:serviceDetail ok:serviceReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"代理配置" detail:proxyDetail ok:proxyReady]];
+    return card;
+}
+
+- (NSView *)setupStatusLineWithTitle:(NSString *)title detail:(NSString *)detail ok:(BOOL)ok {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8;
+    [row addArrangedSubview:[self statusDotWithColor:ok ? NSColor.systemGreenColor : NSColor.systemOrangeColor]];
+    NSTextField *titleLabel = [self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
+    [titleLabel.widthAnchor constraintEqualToConstant:62].active = YES;
+    NSTextField *detailLabel = [self labelWithText:detail font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:ok ? NSColor.labelColor : NSColor.systemOrangeColor];
+    detailLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [row addArrangedSubview:titleLabel];
+    [row addArrangedSubview:detailLabel];
     return row;
 }
 
@@ -712,6 +780,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
     [stack addArrangedSubview:[self labelWithText:@"配置与路径" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"Codex CLI" value:CPBool(self.statusSnapshot[@"codex_cli_found"]) ? CPDisplayString(self.statusSnapshot[@"codex_cli"]) : @"未找到"]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"运行目录" value:CPDisplayString(self.statusSnapshot[@"runtime_dir"])]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"源码/资源" value:CPDisplayString(self.statusSnapshot[@"source_dir"])]];
     NSStackView *buttons = [[NSStackView alloc] init];
@@ -1285,6 +1354,42 @@ static NSString *CPRelativeTime(id epochValue) {
 
 #pragma mark - Actions
 
+- (NSString *)friendlyErrorTextForResult:(NSDictionary *)result fallback:(NSString *)fallback {
+    NSString *error = CPString(result[@"error"]);
+    if ([error isEqualToString:@"codex_cli_missing"] || [error isEqualToString:@"codex_app_missing"]) {
+        NSString *hint = CPString(result[@"codex_cli_error"]);
+        return hint.length ? hint : @"请先安装 Codex App。";
+    }
+    if (error.length) {
+        return error;
+    }
+    return fallback ?: @"";
+}
+
+- (BOOL)showCodexMissingAlertIfNeededForCLI:(BOOL)needsCLI openApp:(BOOL)needsApp {
+    id cliValue = self.statusSnapshot[@"codex_cli_found"];
+    id appValue = self.statusSnapshot[@"codex_app_found"];
+    BOOL cliKnownMissing = needsCLI && cliValue && !CPBool(cliValue);
+    BOOL appKnownMissing = needsApp && appValue && !CPBool(appValue);
+    if (!cliKnownMissing && !appKnownMissing) {
+        return NO;
+    }
+
+    NSString *message = appKnownMissing ? @"未找到 Codex App" : @"未找到 Codex CLI";
+    NSString *hint = CPString(self.statusSnapshot[@"codex_cli_error"]);
+    if (!hint.length || appKnownMissing) {
+        hint = appKnownMissing ? @"请先安装 Codex App，再使用“打开 Codex”。" : @"请先安装 Codex App，或确保 codex 命令在 PATH 中。";
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = message;
+    alert.informativeText = hint;
+    [alert addButtonWithTitle:@"知道了"];
+    [alert runModal];
+    [self appendLog:[NSString stringWithFormat:@"%@：%@", message, hint]];
+    self.footerStatusLabel.stringValue = hint;
+    return YES;
+}
+
 - (void)performAction:(NSArray<NSString *> *)args label:(NSString *)label refreshAfter:(BOOL)refreshAfter {
     if (self.busy) {
         return;
@@ -1298,7 +1403,11 @@ static NSString *CPRelativeTime(id epochValue) {
         [self writeResultWithTitle:label body:body];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self appendLog:body];
-            [self setBusy:NO message:[NSString stringWithFormat:@"%@ 已完成", label]];
+            NSString *errorText = [self friendlyErrorTextForResult:result ?: @{} fallback:nil];
+            BOOL failed = errorText.length > 0 || [result[@"exit_code"] integerValue] != 0;
+            [self setBusy:NO message:failed
+                ? [NSString stringWithFormat:@"%@ 失败：%@", label, errorText.length ? errorText : @"执行失败"]
+                : [NSString stringWithFormat:@"%@ 已完成", label]];
             if (refreshAfter) {
                 [self refreshSnapshots:nil];
             }
@@ -1327,6 +1436,9 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)openCodexAction:(id)sender {
+    if ([self showCodexMissingAlertIfNeededForCLI:NO openApp:YES]) {
+        return;
+    }
     [self performAction:@[@"repair-open-codex"] label:@"打开 Codex" refreshAfter:YES];
 }
 
@@ -1445,6 +1557,9 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)loginCommandAction:(id)sender {
+    if ([self showCodexMissingAlertIfNeededForCLI:YES openApp:NO]) {
+        return;
+    }
     NSString *name = [self askAccountNameWithTitle:@"复制登录命令" prompt:@"请输入新账号名称："];
     if (name) {
         [self performAction:@[@"login-command", @"--name", name] label:[NSString stringWithFormat:@"复制登录命令 %@", name] refreshAfter:YES];
@@ -1452,6 +1567,9 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)startLoginAction:(id)sender {
+    if ([self showCodexMissingAlertIfNeededForCLI:YES openApp:NO]) {
+        return;
+    }
     NSString *name = [self askAccountNameWithTitle:@"打开登录页" prompt:@"请输入新账号名称："];
     if (!name) {
         return;

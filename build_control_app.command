@@ -7,20 +7,17 @@ RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
 APP_ICON="$ROOT/static/icons/AppIcon.icns"
+APP_VERSION="${APP_VERSION:-0.4.3}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
 
+rm -rf "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
 
 if [ ! -f "$APP_ICON" ]; then
   echo "Missing app icon: $APP_ICON" >&2
   exit 1
-fi
-
-if [ -f "$APP/Contents/MacOS/Codex Proxy Control" ] && file "$APP/Contents/MacOS/Codex Proxy Control" | grep -q "shell script"; then
-  cp "$APP/Contents/MacOS/Codex Proxy Control" "$RESOURCES/fallback_menu.zsh"
-  chmod +x "$RESOURCES/fallback_menu.zsh"
 fi
 
 for file in \
@@ -44,7 +41,7 @@ rm -rf "$RUNTIME/static"
 cp -R "$ROOT/static" "$RUNTIME/static"
 cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -64,9 +61,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.3</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>0.4.3</string>
+  <string>$APP_VERSION</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
@@ -130,6 +127,15 @@ PY
 
 clang -fobjc-arc -framework Cocoa "$ROOT/ControlApp.m" -o "$APP/Contents/MacOS/Codex Proxy Control"
 chmod +x "$APP/Contents/MacOS/Codex Proxy Control"
+
+find "$APP" -name ".DS_Store" -delete
+find "$RUNTIME" \( -name "*.log" -o -name "recent_requests.json" \) -delete
+AUTH_LEAK="$(find "$RUNTIME" -path "*/accounts/*/auth.json" -print -quit)"
+if [ -n "$AUTH_LEAK" ]; then
+  echo "Refusing to build app bundle with account credential: $AUTH_LEAK" >&2
+  exit 1
+fi
+
 xattr -cr "$APP"
 xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
 

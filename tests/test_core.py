@@ -235,6 +235,29 @@ class ControlActionsTests(unittest.TestCase):
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
+    def test_login_command_reports_missing_codex_cli(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            with mock.patch("control_actions.find_codex_cli", return_value=None):
+                result = control_actions.login_command("new_account")
+
+            self.assertEqual(result["error"], "codex_cli_missing")
+            self.assertFalse(result.get("command"))
+            self.assertIn("Codex", result["codex_cli_error"])
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_repair_open_codex_reports_missing_app(self):
+        missing_app = Path(tempfile.mkdtemp()) / "Missing Codex.app"
+        with mock.patch.object(control_actions, "CODEX_APP_PATH", missing_app), \
+                mock.patch("control_actions.repair", return_value={"running": True}):
+            result = control_actions.repair_open_codex()
+
+        self.assertEqual(result["error"], "codex_app_missing")
+        self.assertIn("Codex App", result["codex_cli_error"])
+
     def test_render_output_json_keeps_machine_readable_keys(self):
         payload = {
             "action": "status",
