@@ -4,7 +4,7 @@
 
 `Codex Proxy Control.app` 是主要管理入口。浏览器里的 Web 页面只用来查看状态。
 
-## 新 Mac 首次运行
+## Mac 首次运行
 
 ### 1. 安装 App
 
