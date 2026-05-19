@@ -11,8 +11,16 @@ $Root = Split-Path -Parent $WindowsDir
 $Dist = Join-Path $Root "dist\windows"
 $Build = Join-Path $Root "build\windows"
 $Runtime = Join-Path $Dist "runtime"
+$IconPath = Join-Path $Root "static\icons\favicon.ico"
 
 Set-Location $Root
+
+function Assert-NativeCommandSucceeded {
+    param([string]$CommandName)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$CommandName failed with exit code $LASTEXITCODE"
+    }
+}
 
 function Assert-CleanPackageTree {
     param([string]$Path)
@@ -32,6 +40,7 @@ function Assert-CleanPackageTree {
 
 if (-not $SkipPip) {
     & $Python -m pip install -r requirements.txt pyinstaller
+    Assert-NativeCommandSucceeded "pip install"
 }
 
 Remove-Item $Dist -Recurse -Force -ErrorAction SilentlyContinue
@@ -44,13 +53,14 @@ New-Item -ItemType Directory -Force -Path $Dist, $Build, $Runtime | Out-Null
     --onefile `
     --windowed `
     --name "Codex Proxy Control" `
-    --icon "static\icons\favicon.ico" `
+    --icon $IconPath `
     --distpath $Dist `
     --workpath (Join-Path $Build "control") `
     --specpath $Build `
     --paths $Root `
     --paths $WindowsDir `
     (Join-Path $WindowsDir "win_control_app.py")
+Assert-NativeCommandSucceeded "PyInstaller control build"
 
 & $Python -m PyInstaller `
     --noconfirm `
@@ -64,6 +74,7 @@ New-Item -ItemType Directory -Force -Path $Dist, $Build, $Runtime | Out-Null
     --paths $Root `
     --paths $WindowsDir `
     (Join-Path $WindowsDir "codex_proxy_service.py")
+Assert-NativeCommandSucceeded "PyInstaller service build"
 
 $RootRuntimeFiles = @(
     "account_manager.py",
@@ -99,6 +110,8 @@ if (-not $SkipInstaller) {
     }
     if (-not $IsccPath) {
         $Common = @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno\ISCC.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
             "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
             "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
         )
@@ -112,6 +125,7 @@ if (-not $SkipInstaller) {
 
     if ($IsccPath) {
         & $IsccPath (Join-Path $WindowsDir "installer.iss") "/DSourceDir=$Dist" "/DMyAppVersion=$Version"
+        Assert-NativeCommandSucceeded "Inno Setup build"
         Write-Host "Built installer via Inno Setup."
     } else {
         Write-Host "Inno Setup not found. Portable files are ready; rerun without -SkipInstaller after installing Inno Setup."
