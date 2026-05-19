@@ -1,4 +1,5 @@
 param(
+    [string]$Version = "0.5.0",
     [switch]$SkipPip,
     [switch]$SkipInstaller,
     [string]$Python = "python"
@@ -12,6 +13,22 @@ $Build = Join-Path $Root "build\windows"
 $Runtime = Join-Path $Dist "runtime"
 
 Set-Location $Root
+
+function Assert-CleanPackageTree {
+    param([string]$Path)
+    $Forbidden = Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq "auth.json" -or
+        $_.Extension -eq ".docx" -or
+        $_.FullName -match "\\Codex Proxy Control\.app(\\|$)" -or
+        $_.FullName -match "\\runtime\\vendor(\\|$)" -or
+        $_.FullName -match "\\runtime\\python(\\|$)" -or
+        $_.FullName -match "\\accounts\\[^\\]+\\auth\.json$"
+    } | Select-Object -First 1
+
+    if ($Forbidden) {
+        throw "Refusing to package forbidden file or directory: $($Forbidden.FullName)"
+    }
+}
 
 if (-not $SkipPip) {
     & $Python -m pip install -r requirements.txt pyinstaller
@@ -31,7 +48,9 @@ New-Item -ItemType Directory -Force -Path $Dist, $Build, $Runtime | Out-Null
     --distpath $Dist `
     --workpath (Join-Path $Build "control") `
     --specpath $Build `
-    "control_panel.py"
+    --paths $Root `
+    --paths $WindowsDir `
+    (Join-Path $WindowsDir "win_control_app.py")
 
 & $Python -m PyInstaller `
     --noconfirm `
@@ -42,10 +61,11 @@ New-Item -ItemType Directory -Force -Path $Dist, $Build, $Runtime | Out-Null
     --distpath $Dist `
     --workpath (Join-Path $Build "service") `
     --specpath $Build `
+    --paths $Root `
+    --paths $WindowsDir `
     (Join-Path $WindowsDir "codex_proxy_service.py")
 
 $RootRuntimeFiles = @(
-    ".gitignore",
     "account_manager.py",
     "codex_config.py",
     "config.py",
@@ -56,8 +76,7 @@ $RootRuntimeFiles = @(
     "proxy.py",
     "proxy_core.py",
     "quota_tracker.py",
-    "requirements.txt",
-    "service_manager.py"
+    "requirements.txt"
 )
 
 foreach ($File in $RootRuntimeFiles) {
@@ -65,7 +84,10 @@ foreach ($File in $RootRuntimeFiles) {
 }
 
 Copy-Item (Join-Path $WindowsDir "codex_proxy_service.py") (Join-Path $Runtime "codex_proxy_service.py") -Force
+Copy-Item (Join-Path $WindowsDir "win_service_manager.py") (Join-Path $Runtime "win_service_manager.py") -Force
+Copy-Item (Join-Path $WindowsDir "win_service_manager.py") (Join-Path $Runtime "service_manager.py") -Force
 Copy-Item (Join-Path $Root "static") (Join-Path $Runtime "static") -Recurse -Force
+Assert-CleanPackageTree -Path $Runtime
 
 Write-Host "Built portable Windows files in $Dist"
 
@@ -89,7 +111,7 @@ if (-not $SkipInstaller) {
     }
 
     if ($IsccPath) {
-        & $IsccPath (Join-Path $WindowsDir "installer.iss") "/DSourceDir=$Dist"
+        & $IsccPath (Join-Path $WindowsDir "installer.iss") "/DSourceDir=$Dist" "/DMyAppVersion=$Version"
         Write-Host "Built installer via Inno Setup."
     } else {
         Write-Host "Inno Setup not found. Portable files are ready; rerun without -SkipInstaller after installing Inno Setup."

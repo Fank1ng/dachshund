@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Windows background supervisor for the Codex account-pool proxy."""
 
+import argparse
+import json
 import os
 import runpy
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import win_service_manager
 
 
 def _windows_runtime_dir() -> Path:
@@ -28,6 +32,21 @@ def _service_args() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--proxy-child"]
     return [sys.executable, str(Path(__file__).resolve()), "--proxy-child"]
+
+
+def _service_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
+def _source_runtime_dir() -> Path:
+    configured = os.environ.get("CODEX_PROXY_SOURCE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "runtime"
+    return Path(__file__).resolve().parents[1]
 
 
 def _write_pid(path: Path) -> None:
@@ -68,15 +87,44 @@ def _supervise() -> int:
 
 
 def main() -> int:
-    if "--proxy-child" in sys.argv:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--proxy-child", action="store_true")
+    args = parser.parse_args()
+
+    result = None
+    if args.proxy_child:
         _proxy_child()
         return 0
-    if "--uninstall" in sys.argv:
-        import service_manager
+    if args.install:
+        result = win_service_manager.install(
+            source_runtime=_source_runtime_dir(),
+            service_command=_service_command(),
+        )
+    elif args.uninstall:
+        result = win_service_manager.uninstall()
+    elif args.stop:
+        result = win_service_manager.stop()
+    elif args.restart:
+        result = win_service_manager.restart(
+            source_runtime=_source_runtime_dir(),
+            service_command=_service_command(),
+        )
+    elif args.status:
+        result = win_service_manager.status()
+    else:
+        return _supervise()
 
-        service_manager.uninstall()
-        return 0
-    return _supervise()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, default=str))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
 
 
 if __name__ == "__main__":

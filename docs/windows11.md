@@ -1,28 +1,27 @@
 # Codex Proxy Control Windows 版
 
-> 当前文档和 `windows/` 下的脚本是 Windows 版的隔离起点，来源于旧实验目录。
-> 现阶段没有移动根目录里的稳定 macOS 源码；正式 Windows 功能开发时，需要继续把
-> Windows 后台任务、控制端动作和安装流程适配到当前主线源码。
+> Windows 版使用 PyInstaller 生成控制端和后台 supervisor，再用 Inno Setup
+> 生成用户级安装包。根目录里的稳定 macOS 源码和打包脚本保持不动。
 
 ## 构建安装包
 
-在 Windows 10/11 x64 上执行：
+在 Windows 11 x64 上安装 Python 3.11/3.12、Git、Inno Setup 6 后执行：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows\build_windows.ps1
+.\windows\build_windows.ps1 -Version 0.5.0
 ```
 
 脚本会生成：
 
 - `dist\windows\Codex Proxy Control.exe`
 - `dist\windows\CodexProxyService.exe`
-- `dist\CodexProxyControlSetup-0.4.3.exe`（已安装 Inno Setup 时）
+- `dist\CodexProxyControlSetup-0.5.0-win-x64.exe`（已安装 Inno Setup 时）
 
 如果只想生成便携文件：
 
 ```powershell
-.\windows\build_windows.ps1 -SkipInstaller
+.\windows\build_windows.ps1 -Version 0.5.0 -SkipInstaller
 ```
 
 ## 安装与运行

@@ -1,5 +1,7 @@
 #define MyAppName "Codex Proxy Control"
-#define MyAppVersion "0.4.3"
+#ifndef MyAppVersion
+#define MyAppVersion "0.5.0"
+#endif
 #ifndef SourceDir
 #define SourceDir "dist\windows"
 #endif
@@ -18,7 +20,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma2
 SolidCompression=yes
 OutputDir=..\dist
-OutputBaseFilename=CodexProxyControlSetup-{#MyAppVersion}
+OutputBaseFilename=CodexProxyControlSetup-{#MyAppVersion}-win-x64
 UninstallDisplayIcon={app}\Codex Proxy Control.exe
 
 [Files]
@@ -34,6 +36,7 @@ Name: "{autodesktop}\Codex Proxy Control"; Filename: "{app}\Codex Proxy Control.
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Run]
+Filename: "{app}\CodexProxyService.exe"; Parameters: "--install"; Flags: runhidden waituntilterminated
 Filename: "{app}\Codex Proxy Control.exe"; Description: "Launch Codex Proxy Control"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
