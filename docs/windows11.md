@@ -47,6 +47,30 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 卸载会删除计划任务并停止后台进程，但不会删除 `%LOCALAPPDATA%\codexproxyapi\accounts` 里的账号凭证。
 
+## Windows 11 安全拦截
+
+本地用 PyInstaller/Inno Setup 生成的安装包默认没有可信代码签名。Windows 11
+可能会被 Microsoft Defender SmartScreen 或 Smart App Control 拦截，提示
+“智能应用控制已阻止此应用”或类似警告。这是系统对未知发布者安装包的拦截，
+不是代理启动代码异常。
+
+如果是 SmartScreen 的“Windows 已保护你的电脑”提示，可以点击“更多信息”
+再选择“仍要运行”。如果文件是从浏览器或聊天工具下载到本机，也可以先解除
+下载标记：
+
+```powershell
+Unblock-File .\dist\CodexProxyControlSetup-0.5.0-win-x64.exe
+```
+
+如果是 Smart App Control 直接阻止，Windows 通常不会提供单次放行按钮。
+可选处理方式：
+
+- 使用源码方式运行，跳过未签名 exe 安装包。
+- 在 Windows 安全中心关闭 Smart App Control 后再安装。注意关闭后通常不能
+  直接重新开启，可能需要重置或重装 Windows。
+- 为 `Codex Proxy Control.exe`、`CodexProxyService.exe` 和安装包使用可信
+  代码签名证书签名，这是长期分发给其他机器时推荐的方式。
+
 ## 兜底脚本
 
 源码目录下可直接运行：
