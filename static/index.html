@@ -32,9 +32,13 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 .fill{height:100%;border-radius:999px;background:var(--green)}
 .fill.warn{background:var(--amber)}.fill.bad{background:var(--red)}
 .sub{display:block;color:var(--muted);font-size:12px;margin-top:2px}
-.toolbar{display:flex;gap:8px;align-items:center}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.account-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+input{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:8px 10px;min-width:180px}
 button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:8px 11px;cursor:pointer}
 button:hover{border-color:var(--blue)}
+button:disabled{opacity:.55;cursor:not-allowed}
+.log{background:rgba(127,127,127,.08);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:180px;overflow:auto;white-space:pre-wrap}
 @media(max-width:760px){header{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}}
 </style>
 </head>
@@ -43,7 +47,7 @@ button:hover{border-color:var(--blue)}
   <header>
     <div>
       <h1>Codex Proxy Status</h1>
-      <p>Web只做状态诊断。账号、服务和 Codex 配置请用本地 Codex Proxy Control App 管理。</p>
+      <p>账号添加、状态查看和额度刷新都在这里完成。</p>
     </div>
     <div class="toolbar">
       <button id="refresh-button" onclick="refreshQuota()">刷新</button>
@@ -60,6 +64,14 @@ button:hover{border-color:var(--blue)}
 
   <section class="card">
     <h2>账号状态</h2>
+    <div class="account-tools">
+      <input id="account-name" placeholder="账号名称，例如 plus1" autocomplete="off">
+      <button id="login-button" onclick="startAccountLogin()">添加账号</button>
+      <button onclick="scanAccounts()">扫描账号</button>
+      <button onclick="importCurrentAccount()">导入当前 Codex 账号</button>
+    </div>
+    <div id="login-status" class="sub"></div>
+    <div id="login-log" class="log" style="display:none"></div>
     <div id="account-list" class="muted">加载中...</div>
   </section>
 
@@ -108,6 +120,90 @@ async function refreshQuota() {
   }
 }
 
+async function scanAccounts() {
+  const status = document.getElementById('login-status');
+  status.textContent = '正在扫描账号...';
+  const result = await fetchJSON('/api/accounts/scan', { method: 'POST' });
+  status.textContent = Array.isArray(result) ? `已发现 ${result.length} 个账号` : `扫描失败：${result.error || '未知错误'}`;
+  await refreshAll();
+}
+
+async function importCurrentAccount() {
+  const name = accountName();
+  if (!name) return;
+  const status = document.getElementById('login-status');
+  status.textContent = '正在导入当前 Codex 账号...';
+  const result = await fetchJSON('/api/accounts/import-current', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (result.error) {
+    status.textContent = `导入失败：${result.error}`;
+    return;
+  }
+  status.textContent = `已导入账号 ${result.imported}`;
+  await refreshAll();
+}
+
+async function startAccountLogin() {
+  const name = accountName();
+  if (!name) return;
+  const button = document.getElementById('login-button');
+  const status = document.getElementById('login-status');
+  const log = document.getElementById('login-log');
+  button.disabled = true;
+  status.textContent = `正在为 ${name} 启动登录...`;
+  log.style.display = 'block';
+  log.textContent = '';
+  const result = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/login/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (result.error) {
+    button.disabled = false;
+    status.textContent = `启动失败：${result.error}`;
+    return;
+  }
+  await pollLogin(name);
+  button.disabled = false;
+}
+
+async function pollLogin(name) {
+  const status = document.getElementById('login-status');
+  const log = document.getElementById('login-log');
+  for (let i = 0; i < 180; i += 1) {
+    const result = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/login/status`);
+    log.textContent = (result.logs || []).join('\n');
+    log.scrollTop = log.scrollHeight;
+    if (result.state === 'success') {
+      status.textContent = `账号 ${name} 已添加`;
+      await refreshAll();
+      return;
+    }
+    if (result.state === 'error') {
+      status.textContent = `登录失败：${result.error || 'codex login 未完成'}`;
+      return;
+    }
+    status.textContent = `等待浏览器登录完成：${name}`;
+    await sleep(2000);
+  }
+  status.textContent = `仍在等待登录完成：${name}`;
+}
+
+function accountName() {
+  const input = document.getElementById('account-name');
+  const status = document.getElementById('login-status');
+  const name = input.value.trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+    status.textContent = '账号名称只能使用字母、数字、下划线或短横线';
+    input.focus();
+    return '';
+  }
+  return name;
+}
+
 function renderStatus(status) {
   document.getElementById('running').textContent = status && !status.error ? '在线' : '异常';
   document.getElementById('running').className = status && !status.error ? 'num ok' : 'num bad';
@@ -148,7 +244,7 @@ function renderStatus(status) {
 
 function renderAccounts(accounts, quota) {
   if (!accounts.length) {
-    document.getElementById('account-list').innerHTML = '<p>未发现账号。请用本地 App 生成登录命令或导入当前账号。</p>';
+    document.getElementById('account-list').innerHTML = '<p>未发现账号。</p>';
     return;
   }
   document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
@@ -257,6 +353,10 @@ function formatPercent(value) {
 
 function formatTime(epochSeconds) {
   return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 refreshAll();
