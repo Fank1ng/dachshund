@@ -2,7 +2,21 @@ accounts/
 build/
 dist/
 Codex Proxy Control.app/
+*.app/
 *.dmg
+*.exe
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+.vs/
+*.suo
+*.user
+*.nupkg
+runtime/
+vendor/
+python/
 .DS_Store
 *.pyc
 __pycache__/
