@@ -30,14 +30,15 @@ COPY_FILES = {
     "codex_config.py",
     "config.py",
     "config.json",
+    "control_actions.py",
+    "control_panel.py",
     "login_manager.py",
     "proxy.py",
     "proxy_core.py",
     "quota_tracker.py",
     "requirements.txt",
-    "service_manager.py",
 }
-COPY_DIRS = {"static"}
+COPY_DIRS = {"static", "vendor"}
 ACCOUNT_FILES = {"auth.json", "account.json", "quota.json"}
 
 
@@ -70,6 +71,7 @@ def install(*, source_runtime: Optional[Path] = None, service_command: Optional[
     _require_windows()
     source_runtime = source_runtime or _source_dir()
     service_command = service_command or _default_service_command()
+    stop()
     sync_runtime(source_runtime)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     LOG_PATH.touch(exist_ok=True)
@@ -141,6 +143,7 @@ def sync_runtime(source_runtime: Path) -> dict:
         if name == "config.json" and dst.exists():
             continue
         shutil.copy2(src, dst)
+    _sync_windows_service_manager(source, RUNTIME_DIR)
     for name in COPY_DIRS:
         src = source / name
         if not src.exists():
@@ -231,6 +234,7 @@ def _start_supervisor_process(service_command: list[str]) -> None:
         **os.environ,
         CONFIG_DIR_ENV: str(RUNTIME_DIR),
         SOURCE_DIR_ENV: str(_source_dir()),
+        "PYTHONPATH": _pythonpath_env(),
         "PYTHONUNBUFFERED": "1",
     }
     flags = (
@@ -296,6 +300,21 @@ def _sync_accounts(source: Path, target: Path) -> None:
                 shutil.copy2(src, dst)
 
 
+def _sync_windows_service_manager(source: Path, target: Path) -> None:
+    candidates = (
+        source / "win_service_manager.py",
+        source / "windows" / "win_service_manager.py",
+    )
+    for src in candidates:
+        if src.exists():
+            shutil.copy2(src, target / "win_service_manager.py")
+            shutil.copy2(src, target / "service_manager.py")
+            return
+    src = source / "service_manager.py"
+    if src.exists():
+        shutil.copy2(src, target / "service_manager.py")
+
+
 def _assert_no_packaged_credentials(runtime: Path) -> None:
     for path in runtime.rglob("auth.json"):
         try:
@@ -343,3 +362,15 @@ def _current_user() -> str:
     if domain and username:
         return f"{domain}\\{username}"
     return username or os.getlogin()
+
+
+def _pythonpath_env() -> str:
+    paths = []
+    vendor = RUNTIME_DIR / "vendor"
+    if vendor.exists():
+        paths.append(str(vendor))
+    paths.append(str(RUNTIME_DIR))
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        paths.append(existing)
+    return os.pathsep.join(paths)

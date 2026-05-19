@@ -26,6 +26,27 @@ def _windows_runtime_dir() -> Path:
 RUNTIME_DIR = _windows_runtime_dir() if sys.platform == "win32" else Path(__file__).resolve().parent
 os.environ.setdefault("CODEX_PROXY_CONFIG_DIR", str(RUNTIME_DIR))
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
+VENDOR_DIR = RUNTIME_DIR / "vendor"
+DLL_DIRECTORY_HANDLES = []
+
+
+def _configure_runtime_imports() -> None:
+    paths = [RUNTIME_DIR, VENDOR_DIR]
+    for path in reversed(paths):
+        if path.exists():
+            text = str(path)
+            if text not in sys.path:
+                sys.path.insert(0, text)
+    if VENDOR_DIR.exists():
+        existing = os.environ.get("PYTHONPATH")
+        vendor = str(VENDOR_DIR)
+        parts = [vendor, str(RUNTIME_DIR)]
+        if existing:
+            parts.append(existing)
+        os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+        if hasattr(os, "add_dll_directory"):
+            handle = os.add_dll_directory(vendor)
+            DLL_DIRECTORY_HANDLES.append(handle)
 
 
 def _service_args() -> list[str]:
@@ -55,7 +76,7 @@ def _write_pid(path: Path) -> None:
 
 
 def _proxy_child() -> None:
-    sys.path.insert(0, str(RUNTIME_DIR))
+    _configure_runtime_imports()
     os.chdir(RUNTIME_DIR)
     _write_pid(RUNTIME_DIR / "proxy.pid")
     runpy.run_path(str(RUNTIME_DIR / "proxy.py"), run_name="__main__")
@@ -65,7 +86,13 @@ def _supervise() -> int:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     _write_pid(RUNTIME_DIR / "supervisor.pid")
     log_path = RUNTIME_DIR / "proxy.log"
-    env = {**os.environ, "CODEX_PROXY_CONFIG_DIR": str(RUNTIME_DIR), "PYTHONUNBUFFERED": "1"}
+    _configure_runtime_imports()
+    env = {
+        **os.environ,
+        "CODEX_PROXY_CONFIG_DIR": str(RUNTIME_DIR),
+        "CODEX_PROXY_SOURCE_DIR": str(_source_runtime_dir()),
+        "PYTHONUNBUFFERED": "1",
+    }
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     while True:

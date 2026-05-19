@@ -11,6 +11,7 @@ $Root = Split-Path -Parent $WindowsDir
 $Dist = Join-Path $Root "dist\windows"
 $Build = Join-Path $Root "build\windows"
 $Runtime = Join-Path $Dist "runtime"
+$Vendor = Join-Path $Runtime "vendor"
 $IconPath = Join-Path $Root "static\icons\favicon.ico"
 
 Set-Location $Root
@@ -26,9 +27,10 @@ function Assert-CleanPackageTree {
     param([string]$Path)
     $Forbidden = Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -eq "auth.json" -or
+        $_.Name -eq ".env" -or
+        $_.Name -eq "quota.json" -or
         $_.Extension -eq ".docx" -or
         $_.FullName -match "\\Codex Proxy Control\.app(\\|$)" -or
-        $_.FullName -match "\\runtime\\vendor(\\|$)" -or
         $_.FullName -match "\\runtime\\python(\\|$)" -or
         $_.FullName -match "\\accounts\\[^\\]+\\auth\.json$"
     } | Select-Object -First 1
@@ -46,6 +48,13 @@ if (-not $SkipPip) {
 Remove-Item $Dist -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $Build -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Dist, $Build, $Runtime | Out-Null
+
+if (-not $SkipPip) {
+    & $Python -m pip install --upgrade --target $Vendor -r requirements.txt
+    Assert-NativeCommandSucceeded "pip vendor install"
+    & icacls $Vendor /reset /T /C | Out-Null
+    Assert-NativeCommandSucceeded "vendor ACL reset"
+}
 
 & $Python -m PyInstaller `
     --noconfirm `
