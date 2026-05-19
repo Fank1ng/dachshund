@@ -44,17 +44,24 @@ ACCOUNT_FILES = {"auth.json", "account.json", "quota.json"}
 def status() -> dict:
     installed = _task_query().returncode == 0 if _is_windows() else False
     proxy = _proxy_health()
+    supervisor_pid = _read_pid(SUPERVISOR_PID_PATH)
+    proxy_pid = _read_pid(PROXY_PID_PATH)
+    supervisor_running = _pid_running(supervisor_pid)
+    proxy_process_running = _pid_running(proxy_pid)
     return {
         "supported": _is_windows(),
         "task_name": TASK_NAME,
         "installed": installed,
         "loaded": installed,
-        "running": bool(proxy),
+        "running": bool(proxy) or proxy_process_running,
+        "install_mode": "scheduled_task" if installed else ("process" if supervisor_running else None),
         "runtime_dir": str(RUNTIME_DIR),
         "source_dir": str(_source_dir()),
         "log_path": str(LOG_PATH),
-        "supervisor_pid": _read_pid(SUPERVISOR_PID_PATH),
-        "proxy_pid": _read_pid(PROXY_PID_PATH),
+        "supervisor_pid": supervisor_pid,
+        "supervisor_running": supervisor_running,
+        "proxy_pid": proxy_pid,
+        "proxy_process_running": proxy_process_running,
         "proxy": proxy,
     }
 
@@ -66,10 +73,17 @@ def install(*, source_runtime: Optional[Path] = None, service_command: Optional[
     sync_runtime(source_runtime)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     LOG_PATH.touch(exist_ok=True)
-    _create_task(service_command)
-    _start_task()
+    task_error = None
+    try:
+        _create_task(service_command)
+        _start_task()
+    except RuntimeError as exc:
+        task_error = str(exc)
+        _start_supervisor_process(service_command)
     result = status()
     result["action"] = "install"
+    if task_error:
+        result["task_error"] = task_error
     return result
 
 
@@ -96,13 +110,21 @@ def restart(*, source_runtime: Optional[Path] = None, service_command: Optional[
     _require_windows()
     if source_runtime:
         sync_runtime(source_runtime)
-    if service_command and _task_query().returncode != 0:
-        _create_task(service_command)
-    else:
-        stop()
-    _start_task()
+    task_error = None
+    stop()
+    try:
+        if service_command and _task_query().returncode != 0:
+            _create_task(service_command)
+        _start_task()
+    except RuntimeError as exc:
+        task_error = str(exc)
+        if not service_command:
+            raise
+        _start_supervisor_process(service_command)
     result = status()
     result["action"] = "restart"
+    if task_error:
+        result["task_error"] = task_error
     return result
 
 
@@ -146,12 +168,31 @@ def _source_dir() -> Path:
         path = Path(configured).expanduser()
         if path.exists():
             return path
+    if getattr(sys, "frozen", False):
+        runtime = Path(sys.executable).resolve().parent / "runtime"
+        if runtime.exists():
+            return runtime
     return Path(__file__).resolve().parent
 
 
 def _create_task(service_command: list[str]) -> None:
     command = command_line(service_command)
-    result = _run(
+    candidates = [
+        [
+            "schtasks",
+            "/Create",
+            "/TN",
+            TASK_NAME,
+            "/TR",
+            command,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "LIMITED",
+            "/RU",
+            _current_user(),
+            "/F",
+        ],
         [
             "schtasks",
             "/Create",
@@ -165,16 +206,52 @@ def _create_task(service_command: list[str]) -> None:
             "LIMITED",
             "/F",
         ],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(_process_message(result) or "failed to create scheduled task")
+    ]
+    errors = []
+    for args in candidates:
+        result = _run(args, check=False)
+        if result.returncode == 0:
+            return
+        errors.append(_process_message(result) or f"exit code {result.returncode}")
+    raise RuntimeError("; ".join(errors) or "failed to create scheduled task")
 
 
 def _start_task() -> None:
     result = _run(["schtasks", "/Run", "/TN", TASK_NAME], check=False)
     if result.returncode != 0:
         raise RuntimeError(_process_message(result) or "failed to start scheduled task")
+
+
+def _start_supervisor_process(service_command: list[str]) -> None:
+    if _pid_running(_read_pid(SUPERVISOR_PID_PATH)):
+        return
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_PATH.touch(exist_ok=True)
+    env = {
+        **os.environ,
+        CONFIG_DIR_ENV: str(RUNTIME_DIR),
+        SOURCE_DIR_ENV: str(_source_dir()),
+        "PYTHONUNBUFFERED": "1",
+    }
+    flags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    )
+    with open(LOG_PATH, "a", encoding="utf-8", buffering=1) as log:
+        process = subprocess.Popen(
+            [str(arg) for arg in service_command],
+            cwd=str(RUNTIME_DIR),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+    SUPERVISOR_PID_PATH.write_text(str(process.pid))
+    time.sleep(1)
+    if process.poll() is not None:
+        raise RuntimeError(f"failed to start supervisor process: exit code {process.returncode}")
 
 
 def _task_query() -> subprocess.CompletedProcess:
@@ -187,6 +264,13 @@ def _taskkill(pid: Optional[int]) -> None:
     if not pid:
         return
     _run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
+
+
+def _pid_running(pid: Optional[int]) -> bool:
+    if not pid or not _is_windows():
+        return False
+    result = _run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], check=False)
+    return result.returncode == 0 and str(pid) in (result.stdout or "")
 
 
 def _read_pid(path: Path) -> Optional[int]:
@@ -234,7 +318,7 @@ def _proxy_health() -> Optional[dict]:
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(args, capture_output=True, text=True)
+    result = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if check and result.returncode != 0:
         raise RuntimeError(_process_message(result) or f"command failed: {args[0]}")
     return result
@@ -251,3 +335,11 @@ def _is_windows() -> bool:
 def _require_windows() -> None:
     if not _is_windows():
         raise RuntimeError("Windows Scheduled Task support is only available on Windows")
+
+
+def _current_user() -> str:
+    domain = os.environ.get("USERDOMAIN")
+    username = os.environ.get("USERNAME")
+    if domain and username:
+        return f"{domain}\\{username}"
+    return username or os.getlogin()
