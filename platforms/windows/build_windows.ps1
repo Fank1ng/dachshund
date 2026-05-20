@@ -7,12 +7,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $WindowsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Root = Split-Path -Parent $WindowsDir
+$Root = Split-Path -Parent (Split-Path -Parent $WindowsDir)
+$CoreDir = Join-Path $Root "src\core"
 $Dist = Join-Path $Root "dist\windows"
 $Build = Join-Path $Root "build\windows"
 $Runtime = Join-Path $Dist "runtime"
 $Vendor = Join-Path $Runtime "vendor"
-$IconPath = Join-Path $Root "static\icons\favicon.ico"
+$IconPath = Join-Path $CoreDir "static\icons\favicon.ico"
 $ServiceCollectModules = @(
     "asyncio",
     "aiohappyeyeballs",
@@ -81,7 +82,7 @@ if (-not $SkipPip) {
     --distpath $Dist `
     --workpath (Join-Path $Build "control") `
     --specpath $Build `
-    --paths $Root `
+    --paths $CoreDir `
     --paths $WindowsDir `
     (Join-Path $WindowsDir "win_control_app.py")
 Assert-NativeCommandSucceeded "PyInstaller control build"
@@ -95,7 +96,7 @@ Assert-NativeCommandSucceeded "PyInstaller control build"
     --distpath $Dist `
     --workpath (Join-Path $Build "service") `
     --specpath $Build `
-    --paths $Root `
+    --paths $CoreDir `
     --paths $WindowsDir `
     @ServiceCollectArgs `
     (Join-Path $WindowsDir "codex_proxy_service.py")
@@ -106,8 +107,6 @@ $RootRuntimeFiles = @(
     "codex_config.py",
     "config.py",
     "config.json",
-    "control_actions.py",
-    "control_panel.py",
     "login_manager.py",
     "proxy.py",
     "proxy_core.py",
@@ -116,13 +115,17 @@ $RootRuntimeFiles = @(
 )
 
 foreach ($File in $RootRuntimeFiles) {
-    Copy-Item (Join-Path $Root $File) (Join-Path $Runtime $File) -Force
+    if ($File -eq "requirements.txt") {
+        Copy-Item (Join-Path $Root $File) (Join-Path $Runtime $File) -Force
+    } else {
+        Copy-Item (Join-Path $CoreDir $File) (Join-Path $Runtime $File) -Force
+    }
 }
 
 Copy-Item (Join-Path $WindowsDir "codex_proxy_service.py") (Join-Path $Runtime "codex_proxy_service.py") -Force
 Copy-Item (Join-Path $WindowsDir "win_service_manager.py") (Join-Path $Runtime "win_service_manager.py") -Force
 Copy-Item (Join-Path $WindowsDir "win_service_manager.py") (Join-Path $Runtime "service_manager.py") -Force
-Copy-Item (Join-Path $Root "static") (Join-Path $Runtime "static") -Recurse -Force
+Copy-Item (Join-Path $CoreDir "static") (Join-Path $Runtime "static") -Recurse -Force
 Assert-CleanPackageTree -Path $Runtime
 
 Write-Host "Built portable Windows files in $Dist"

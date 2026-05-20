@@ -1,9 +1,18 @@
 """Configuration management — reads and writes config.json."""
 
 import json
+import os
 from pathlib import Path
 
-CONFIG_DIR = Path(__file__).resolve().parent
+
+def _default_config_dir() -> Path:
+    core_dir = Path(__file__).resolve().parent
+    if core_dir.name == "core" and core_dir.parent.name == "src":
+        return core_dir.parent.parent
+    return core_dir
+
+
+CONFIG_DIR = Path(os.environ.get("CODEX_PROXY_CONFIG_DIR") or _default_config_dir()).expanduser()
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULTS = {

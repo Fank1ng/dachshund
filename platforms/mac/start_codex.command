@@ -1,7 +1,11 @@
 #!/bin/zsh
 set -e
 
-cd "$(dirname "$0")"
+MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$MAC_DIR/../.." && pwd)"
+export PYTHONPATH="$ROOT/src/core:$MAC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export CODEX_PROXY_SOURCE_DIR="$ROOT"
+cd "$ROOT"
 python3 - <<'PY'
 import json
 import subprocess

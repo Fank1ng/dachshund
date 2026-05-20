@@ -1,7 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$MAC_DIR/../.." && pwd)"
 APP_NAME="Codex Proxy Control.app"
 APP="$ROOT/$APP_NAME"
 BUILD_DIR="$ROOT/build"
@@ -44,7 +45,7 @@ sign_runtime_components() {
   fi
 }
 
-"$ROOT/build_control_app.command"
+"$MAC_DIR/build_control_app.command"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 DMG_NAME="Codex-Proxy-Control-${VERSION}-mac.dmg"

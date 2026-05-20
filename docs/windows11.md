@@ -9,7 +9,7 @@
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows\build_windows.ps1 -Version 0.5.0
+.\platforms\windows\build_windows.ps1 -Version 0.5.0
 ```
 
 脚本会生成：
@@ -21,10 +21,16 @@ Set-ExecutionPolicy -Scope Process Bypass
 如果只想生成便携文件：
 
 ```powershell
-.\windows\build_windows.ps1 -Version 0.5.0 -SkipInstaller
+.\platforms\windows\build_windows.ps1 -Version 0.5.0 -SkipInstaller
 ```
 
 ## 安装与运行
+
+已发布的 Windows 安装包在 GitHub Release:
+
+```text
+https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.5.0
+```
 
 安装包默认安装到：
 
@@ -76,8 +82,8 @@ Unblock-File .\dist\CodexProxyControlSetup-0.5.0-win-x64.exe
 源码目录下可直接运行：
 
 ```powershell
-.\windows\setup_proxy.ps1
-.\windows\start_codex.ps1
+.\platforms\windows\setup_proxy.ps1
+.\platforms\windows\start_codex.ps1
 ```
 
 登录命令会使用 PowerShell 格式：

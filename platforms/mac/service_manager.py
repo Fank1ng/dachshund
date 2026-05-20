@@ -54,7 +54,7 @@ def status() -> dict:
         "runtime_dir": str(RUNTIME_DIR),
         "source_dir": str(source),
         "runtime_is_source": runtime_is_source,
-        "can_sync_source": (not runtime_is_source) and (source / "proxy.py").exists(),
+        "can_sync_source": (not runtime_is_source) and _source_file(source, "proxy.py").exists(),
         "python": str(_python_executable()),
         "pythonpath": str(_pythonpath()),
         "installed": PLIST_PATH.exists(),
@@ -154,13 +154,13 @@ def _sync_runtime_dir() -> None:
         return
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     for name in COPY_FILES:
-        src = source / name
+        src = _source_file(source, name)
         if src.exists():
             if name == "config.json" and (RUNTIME_DIR / name).exists():
                 continue
             shutil.copy2(src, RUNTIME_DIR / name)
     for name in COPY_DIRS:
-        src = source / name
+        src = _source_dir_entry(source, name)
         if src.exists():
             dst = target / name
             if dst.exists():
@@ -176,6 +176,29 @@ def _source_dir() -> Path:
         if path.exists():
             return path
     return CONFIG_DIR
+
+
+def _source_file(source: Path, name: str) -> Path:
+    direct = source / name
+    if direct.exists():
+        return direct
+    core = source / "src" / "core" / name
+    if core.exists():
+        return core
+    mac = source / "platforms" / "mac" / name
+    if mac.exists():
+        return mac
+    return direct
+
+
+def _source_dir_entry(source: Path, name: str) -> Path:
+    direct = source / name
+    if direct.exists():
+        return direct
+    core = source / "src" / "core" / name
+    if core.exists():
+        return core
+    return direct
 
 
 def _app_bundle_dir() -> Path:

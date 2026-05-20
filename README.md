@@ -389,7 +389,7 @@ quota.json
 维护者需要打包时运行：
 
 ```bash
-./build_dmg.command
+./platforms/mac/build_dmg.command
 ```
 
 DMG 会输出到：

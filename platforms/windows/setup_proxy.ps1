@@ -1,10 +1,11 @@
 $ErrorActionPreference = "Stop"
 $WindowsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Root = Split-Path -Parent $WindowsDir
+$Root = Split-Path -Parent (Split-Path -Parent $WindowsDir)
 Set-Location $Root
 
 $env:CODEX_PROXY_SOURCE_DIR = $Root
 $env:CODEX_PROXY_CONFIG_DIR = Join-Path $env:LOCALAPPDATA "codexproxyapi"
+$env:PYTHONPATH = (Join-Path $Root "src\core") + ";" + $WindowsDir + $(if ($env:PYTHONPATH) { ";" + $env:PYTHONPATH } else { "" })
 $Service = Join-Path $WindowsDir "codex_proxy_service.py"
 
 python $Service --install

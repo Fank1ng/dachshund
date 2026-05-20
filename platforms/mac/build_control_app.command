@@ -1,13 +1,15 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$MAC_DIR/../.." && pwd)"
+CORE_DIR="$ROOT/src/core"
 APP="$ROOT/Codex Proxy Control.app"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
-APP_ICON="$ROOT/static/icons/AppIcon.icns"
-APP_VERSION="${APP_VERSION:-0.4.3}"
+APP_ICON="$CORE_DIR/static/icons/AppIcon.icns"
+APP_VERSION="${APP_VERSION:-0.5.0}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
@@ -60,20 +62,29 @@ for file in \
   codex_config.py \
   config.py \
   config.json \
-  control_actions.py \
-  control_panel.py \
   login_manager.py \
   proxy.py \
   proxy_core.py \
   quota_tracker.py \
-  requirements.txt \
+  requirements.txt
+do
+  if [ "$file" = "requirements.txt" ]; then
+    cp "$ROOT/$file" "$RUNTIME/$file"
+  else
+    cp "$CORE_DIR/$file" "$RUNTIME/$file"
+  fi
+done
+
+for file in \
+  control_actions.py \
+  control_panel.py \
   service_manager.py
 do
-  cp "$ROOT/$file" "$RUNTIME/$file"
+  cp "$MAC_DIR/$file" "$RUNTIME/$file"
 done
 
 rm -rf "$RUNTIME/static"
-cp -R "$ROOT/static" "$RUNTIME/static"
+cp -R "$CORE_DIR/static" "$RUNTIME/static"
 cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -160,7 +171,7 @@ for package in packages:
         shutil.copy2(src, dst)
 PY
 
-clang -fobjc-arc -framework Cocoa "$ROOT/ControlApp.m" -o "$APP/Contents/MacOS/Codex Proxy Control"
+clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/Codex Proxy Control"
 chmod +x "$APP/Contents/MacOS/Codex Proxy Control"
 
 find "$APP" -name ".DS_Store" -delete

@@ -18,10 +18,10 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 
-ROOT = Path(__file__).resolve().parents[1] if not getattr(sys, "frozen", False) else Path(sys.executable).resolve().parent
+ROOT = Path(__file__).resolve().parents[2] if not getattr(sys, "frozen", False) else Path(sys.executable).resolve().parent
 SOURCE_RUNTIME = ROOT / "runtime" if getattr(sys, "frozen", False) else ROOT
 if not getattr(sys, "frozen", False):
-    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "src" / "core"))
 
 import codex_config  # noqa: E402
 import win_service_manager  # noqa: E402
@@ -46,7 +46,7 @@ def clean_python_boot_env(env: dict[str, str]) -> dict[str, str]:
 def service_command(*args: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [str(Path(sys.executable).with_name("CodexProxyService.exe")), *args]
-    return [sys.executable, str(ROOT / "windows" / "codex_proxy_service.py"), *args]
+    return [sys.executable, str(ROOT / "platforms" / "windows" / "codex_proxy_service.py"), *args]
 
 
 def validate_account_name(name: str) -> str:

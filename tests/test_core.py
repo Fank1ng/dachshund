@@ -1,10 +1,15 @@
 import json
 import os
+import sys
 import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src" / "core"))
+sys.path.insert(0, str(ROOT / "platforms" / "mac"))
 
 import account_manager
 import codex_config

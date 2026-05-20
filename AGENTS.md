@@ -5,9 +5,9 @@ A local reverse proxy that pools multiple ChatGPT Plus accounts for use with Cod
 ## Architecture
 
 ```
-Codex CLI → proxy.py (aiohttp, :8800) → api.openai.com / chatgpt.com
+Codex CLI → src/core/proxy.py (aiohttp, :8800) → api.openai.com / chatgpt.com
                  │
-                 ├── /app        → static/index.html  (Web UI)
+                 ├── /app        → src/core/static/index.html  (Web UI)
                  ├── /api/*      → management REST API
                  └── /v1/*, /backend-api/* → proxy_core (forward + account rotation)
 ```
@@ -16,12 +16,14 @@ Codex CLI → proxy.py (aiohttp, :8800) → api.openai.com / chatgpt.com
 
 | File | Purpose |
 |------|---------|
-| `proxy.py` | Main entry point. Registers all routes, starts aiohttp server, wires up background tasks. |
-| `proxy_core.py` | Request forwarding engine. Routes `/v1/*` → `api.openai.com` and `/backend-api/*` → `chatgpt.com`. Picks account from pool, retries on 429/401, passes through SSE streams. |
-| `account_manager.py` | `Account` class: loads OAuth tokens from `auth.json`, decodes JWT claims, refreshes via `auth.openai.com/oauth/token`. `AccountPool`: round-robin selection with cooldown tracking. |
-| `quota_tracker.py` | Background task that polls `chatgpt.com/backend-api/codex/usage` per account, saves to `quota.json`. |
-| `config.py` | Reads/writes `config.json`. |
-| `static/index.html` | Single-file web dashboard (vanilla HTML/CSS/JS). Three tabs: dashboard, accounts, settings. |
+| `src/core/proxy.py` | Main entry point. Registers all routes, starts aiohttp server, wires up background tasks. |
+| `src/core/proxy_core.py` | Request forwarding engine. Routes `/v1/*` → `api.openai.com` and `/backend-api/*` → `chatgpt.com`. Picks account from pool, retries on 429/401, passes through SSE streams. |
+| `src/core/account_manager.py` | `Account` class: loads OAuth tokens from `auth.json`, decodes JWT claims, refreshes via `auth.openai.com/oauth/token`. `AccountPool`: round-robin selection with cooldown tracking. |
+| `src/core/quota_tracker.py` | Background task that polls `chatgpt.com/backend-api/codex/usage` per account, saves to `quota.json`. |
+| `src/core/config.py` | Reads/writes `config.json`. Runtime data defaults to the repo root when running from source. |
+| `src/core/static/index.html` | Single-file web dashboard (vanilla HTML/CSS/JS). Three tabs: dashboard, accounts, settings. |
+| `platforms/mac/` | macOS app, LaunchAgent helpers, and DMG build scripts. |
+| `platforms/windows/` | Windows control app, Scheduled Task helper, PyInstaller, and Inno Setup files. |
 
 ## Key Design Decisions
 

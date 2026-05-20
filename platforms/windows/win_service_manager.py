@@ -31,8 +31,6 @@ COPY_FILES = {
     "codex_config.py",
     "config.py",
     "config.json",
-    "control_actions.py",
-    "control_panel.py",
     "login_manager.py",
     "proxy.py",
     "proxy_core.py",
@@ -137,7 +135,7 @@ def sync_runtime(source_runtime: Path) -> dict:
         raise FileNotFoundError(f"runtime source not found: {source}")
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     for name in COPY_FILES:
-        src = source / name
+        src = _source_file(source, name)
         if not src.exists():
             continue
         dst = RUNTIME_DIR / name
@@ -146,7 +144,7 @@ def sync_runtime(source_runtime: Path) -> dict:
         shutil.copy2(src, dst)
     _sync_windows_service_manager(source, RUNTIME_DIR)
     for name in COPY_DIRS:
-        src = source / name
+        src = _source_dir_entry(source, name)
         if not src.exists():
             continue
         dst = RUNTIME_DIR / name
@@ -176,7 +174,34 @@ def _source_dir() -> Path:
         runtime = Path(sys.executable).resolve().parent / "runtime"
         if runtime.exists():
             return runtime
-    return Path(__file__).resolve().parent
+    module_dir = Path(__file__).resolve().parent
+    if module_dir.name == "windows" and module_dir.parent.name == "platforms":
+        return module_dir.parent.parent
+    return module_dir
+
+
+def _source_file(source: Path, name: str) -> Path:
+    if name == "service_manager.py":
+        windows_manager = source / "platforms" / "windows" / "win_service_manager.py"
+        if windows_manager.exists():
+            return windows_manager
+    direct = source / name
+    if direct.exists():
+        return direct
+    core = source / "src" / "core" / name
+    if core.exists():
+        return core
+    return direct
+
+
+def _source_dir_entry(source: Path, name: str) -> Path:
+    direct = source / name
+    if direct.exists():
+        return direct
+    core = source / "src" / "core" / name
+    if core.exists():
+        return core
+    return direct
 
 
 def _create_task(service_command: list[str]) -> None:
@@ -326,6 +351,7 @@ def _sync_windows_service_manager(source: Path, target: Path) -> None:
     candidates = (
         source / "win_service_manager.py",
         source / "windows" / "win_service_manager.py",
+        source / "platforms" / "windows" / "win_service_manager.py",
     )
     for src in candidates:
         if src.exists():

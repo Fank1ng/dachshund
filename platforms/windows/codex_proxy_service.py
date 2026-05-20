@@ -75,7 +75,7 @@ def _source_runtime_dir() -> Path:
         return Path(configured).expanduser()
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "runtime"
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _write_pid(path: Path) -> None:

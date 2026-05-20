@@ -1,6 +1,6 @@
 """Codex Account Pool Proxy — main entry point.
 
-Start with: python3 proxy.py
+Start with: PYTHONPATH=src/core:platforms/mac python3 src/core/proxy.py
 Web UI:      http://127.0.0.1:8800/app
 """
 
@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -33,7 +34,7 @@ import service_manager
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.4.3"
+APP_VERSION = "0.5.0"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -46,7 +47,15 @@ logger = logging.getLogger("proxy")
 pool = AccountPool()
 login_manager = LoginManager()
 
-STATIC_DIR = CONFIG_DIR / "static"
+STATIC_DIR = (
+    Path(os.environ["CODEX_PROXY_STATIC_DIR"]).expanduser()
+    if os.environ.get("CODEX_PROXY_STATIC_DIR")
+    else (
+        Path(__file__).resolve().parent / "static"
+        if (Path(__file__).resolve().parent / "static").exists()
+        else CONFIG_DIR / "static"
+    )
+)
 TRASH_DIR = ACCOUNTS_DIR / ".trash"
 TRASH_ENTRY_RE = re.compile(r"^([A-Za-z0-9_-]{1,64})-(\d{8})-(\d{6})$")
 OPENAI_INFERENCE_PATHS = (
@@ -538,7 +547,7 @@ async def api_service_uninstall(request: web.Request) -> web.Response:
 async def serve_ui(request: web.Request) -> web.Response:
     index = STATIC_DIR / "index.html"
     if not index.exists():
-        return web.Response(text="UI not found. Create static/index.html", status=404)
+        return web.Response(text="UI not found. Check src/core/static/index.html", status=404)
     return web.FileResponse(index, headers={"Cache-Control": "no-store"})
 
 

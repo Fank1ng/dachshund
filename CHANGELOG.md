@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 - 2026-05-20
+## v0.5.0 - 2026-05-20
 
 - Added the first Windows 11 installer path using PyInstaller and Inno Setup.
 - Added a Windows Scheduled Task service helper for user-level background startup.
@@ -8,3 +8,5 @@
 - Updated Windows PowerShell helper scripts to use the Windows service CLI instead of macOS LaunchAgent actions.
 - Added packaging guards to reject credentials, `.docx` files, macOS app bundles, and copied runtime dependency trees.
 - Updated Windows documentation for the `0.5.0` installer build flow.
+- Uploaded the Windows installer and existing `Codex-Proxy-Control-0.4.3-mac.dmg` to the `v0.5.0` GitHub release.
+- Reorganized source into `src/core`, `platforms/mac`, and `platforms/windows`.
