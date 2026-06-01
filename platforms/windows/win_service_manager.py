@@ -28,6 +28,7 @@ PROXY_PID_PATH = RUNTIME_DIR / "proxy.pid"
 
 COPY_FILES = {
     "account_manager.py",
+    "codex_cli.py",
     "codex_config.py",
     "config.py",
     "config.json",
@@ -261,6 +262,7 @@ def _start_supervisor_process(service_command: list[str]) -> None:
         CONFIG_DIR_ENV: str(RUNTIME_DIR),
         SOURCE_DIR_ENV: str(_source_dir()),
         "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1",
     }
     flags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -277,7 +279,7 @@ def _start_supervisor_process(service_command: list[str]) -> None:
             stderr=subprocess.STDOUT,
             creationflags=flags,
         )
-    SUPERVISOR_PID_PATH.write_text(str(process.pid))
+    SUPERVISOR_PID_PATH.write_text(str(process.pid), encoding="utf-8")
     time.sleep(1)
     if process.poll() is not None:
         raise RuntimeError(f"failed to start supervisor process: exit code {process.returncode}")
@@ -326,7 +328,7 @@ def _pid_running(pid: Optional[int]) -> bool:
 
 def _read_pid(path: Path) -> Optional[int]:
     try:
-        return int(path.read_text().strip())
+        return int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
 
@@ -389,6 +391,7 @@ def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
         args,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         stdin=subprocess.DEVNULL,
         env=_clean_python_boot_env(os.environ),
     )

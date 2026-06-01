@@ -347,7 +347,7 @@ async def api_quota(request: web.Request) -> web.Response:
         quota_file = ACCOUNTS_DIR / acct.name / "quota.json"
         if quota_file.exists():
             try:
-                with open(quota_file) as f:
+                with open(quota_file, encoding="utf-8") as f:
                     result[acct.name] = json.load(f)
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning(f"Account {acct.name}: failed to read quota data: {e}")

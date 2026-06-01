@@ -24,6 +24,7 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(ROOT / "src" / "core"))
 
 import codex_config  # noqa: E402
+from codex_cli import CODEX_CLI_MISSING_MESSAGE, find_codex_cli  # noqa: E402
 import win_service_manager  # noqa: E402
 
 
@@ -41,6 +42,15 @@ def clean_python_boot_env(env: dict[str, str]) -> dict[str, str]:
     for key in PYTHON_BOOT_ENV_KEYS:
         cleaned.pop(key, None)
     return cleaned
+
+
+def _safe_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = clean_python_boot_env(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    if extra:
+        env.update(extra)
+    return env
 
 
 def service_command(*args: str) -> list[str]:
@@ -156,20 +166,6 @@ def decode_jwt_claims(token: str) -> dict:
         return {}
 
 
-def find_codex_cli() -> str | None:
-    found = shutil.which("codex")
-    if found:
-        return found
-    windows_apps = Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "WindowsApps"
-    try:
-        for candidate in windows_apps.glob("OpenAI.Codex_*_x64__*\\app\\resources\\codex.exe"):
-            if candidate.exists():
-                return str(candidate)
-    except OSError:
-        pass
-    return None
-
-
 def powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -268,15 +264,15 @@ class ControlApp:
         threading.Thread(target=work, daemon=True).start()
 
     def run_service(self, *args: str) -> dict:
-        env = {
-            **clean_python_boot_env(os.environ),
+        env = _safe_subprocess_env({
             "CODEX_PROXY_SOURCE_DIR": str(SOURCE_RUNTIME),
             "CODEX_PROXY_CONFIG_DIR": str(win_service_manager.RUNTIME_DIR),
-        }
+        })
         result = subprocess.run(
             service_command(*args, "--json"),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             env=env,
             check=False,
         )
@@ -331,7 +327,7 @@ class ControlApp:
                 raise FileExistsError(f"{safe_name} already has auth.json")
             codex_cli = find_codex_cli()
             if not codex_cli:
-                raise FileNotFoundError("Codex CLI not found in PATH")
+                raise FileNotFoundError(CODEX_CLI_MISSING_MESSAGE)
             target.mkdir(parents=True, exist_ok=True)
             command = (
                 f"$env:CODEX_HOME = {powershell_literal(str(target))}; "
@@ -351,7 +347,7 @@ class ControlApp:
                     command,
                 ],
                 cwd=str(win_service_manager.RUNTIME_DIR),
-                env=clean_python_boot_env(os.environ),
+                env=_safe_subprocess_env(),
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
             return {

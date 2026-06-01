@@ -38,7 +38,7 @@ class ConfigError(ValueError):
 
 def load() -> dict:
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
     else:
         cfg = {}
@@ -48,7 +48,7 @@ def load() -> dict:
 def save(cfg: dict) -> None:
     validated = validate(cfg)
     tmp_path = CONFIG_PATH.with_suffix(".json.tmp")
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(validated, f, indent=2)
         f.write("\n")
     tmp_path.replace(CONFIG_PATH)

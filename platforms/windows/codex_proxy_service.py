@@ -80,7 +80,7 @@ def _source_runtime_dir() -> Path:
 
 def _write_pid(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(os.getpid()))
+    path.write_text(str(os.getpid()), encoding="utf-8")
 
 
 def _proxy_child() -> None:
@@ -100,6 +100,7 @@ def _supervise() -> int:
         "CODEX_PROXY_CONFIG_DIR": str(RUNTIME_DIR),
         "CODEX_PROXY_SOURCE_DIR": str(_source_runtime_dir()),
         "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1",
     }
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -115,7 +116,7 @@ def _supervise() -> int:
                 stderr=subprocess.STDOUT,
                 creationflags=creationflags,
             )
-            (RUNTIME_DIR / "proxy.pid").write_text(str(process.pid))
+            (RUNTIME_DIR / "proxy.pid").write_text(str(process.pid), encoding="utf-8")
             returncode = process.wait()
             log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] proxy child exited: {returncode}\n")
         time.sleep(2)

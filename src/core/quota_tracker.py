@@ -80,7 +80,7 @@ async def refresh_once(pool: AccountPool) -> dict:
             data["_fetched_at"] = time.time()
             quota_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = quota_file.with_suffix(".json.tmp")
-            with open(tmp_file, "w") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
             tmp_file.replace(quota_file)

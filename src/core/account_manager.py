@@ -63,7 +63,7 @@ class Account:
         if not self.auth_path.exists():
             return False
         try:
-            with open(self.auth_path) as f:
+            with open(self.auth_path, encoding="utf-8") as f:
                 data = json.load(f)
             tokens = data.get("tokens", {})
             self.access_token = tokens.get("access_token", "")
@@ -92,14 +92,14 @@ class Account:
         }
         if self.auth_path.exists():
             try:
-                with open(self.auth_path) as f:
+                with open(self.auth_path, encoding="utf-8") as f:
                     old = json.load(f)
                 data["tokens"]["id_token"] = old.get("tokens", {}).get("id_token", "")
                 data["tokens"]["account_id"] = old.get("tokens", {}).get("account_id", "")
             except Exception:
                 pass
         self.auth_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.auth_path, "w") as f:
+        with open(self.auth_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def load_meta(self) -> None:
@@ -108,7 +108,7 @@ class Account:
             self.enabled = True
             return
         try:
-            with open(self.meta_path) as f:
+            with open(self.meta_path, encoding="utf-8") as f:
                 data = json.load(f)
             self.enabled = bool(data.get("enabled", True))
             self.auth_error = str(data.get("auth_error", ""))
@@ -126,7 +126,7 @@ class Account:
         }
         self.meta_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.meta_path.with_suffix(".json.tmp")
-        with open(tmp_path, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
         tmp_path.replace(self.meta_path)
@@ -409,7 +409,7 @@ class AccountPool:
         if not quota_file.exists():
             return None
         try:
-            with open(quota_file) as f:
+            with open(quota_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             return None
@@ -546,7 +546,7 @@ class AccountPool:
         if not RECENT_REQUESTS_FILE.exists():
             return
         try:
-            with open(RECENT_REQUESTS_FILE) as f:
+            with open(RECENT_REQUESTS_FILE, encoding="utf-8") as f:
                 rows = json.load(f)
             if isinstance(rows, list):
                 self.recent_requests.extend(row for row in rows[:50] if isinstance(row, dict))
@@ -557,7 +557,7 @@ class AccountPool:
         try:
             RECENT_REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = RECENT_REQUESTS_FILE.with_suffix(".json.tmp")
-            with open(tmp_path, "w") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(list(self.recent_requests), f, indent=2)
                 f.write("\n")
             tmp_path.replace(RECENT_REQUESTS_FILE)

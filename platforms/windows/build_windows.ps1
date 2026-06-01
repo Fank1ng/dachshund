@@ -104,6 +104,7 @@ Assert-NativeCommandSucceeded "PyInstaller service build"
 
 $RootRuntimeFiles = @(
     "account_manager.py",
+    "codex_cli.py",
     "codex_config.py",
     "config.py",
     "config.json",

@@ -2,22 +2,13 @@
 
 import asyncio
 import os
-import shutil
 import time
 from collections import deque
 from pathlib import Path
 from typing import Optional
 
 from account_manager import account_dir, validate_account_name
-
-
-DEFAULT_CODEX_CLI = "/Applications/Codex.app/Contents/Resources/codex"
-
-
-def find_codex_cli() -> Optional[str]:
-    if Path(DEFAULT_CODEX_CLI).exists():
-        return DEFAULT_CODEX_CLI
-    return shutil.which("codex")
+from codex_cli import CODEX_CLI_MISSING_MESSAGE, find_codex_cli
 
 
 class LoginTask:
@@ -159,7 +150,7 @@ class LoginManager:
 
         codex_cli = find_codex_cli()
         if not codex_cli:
-            raise FileNotFoundError("Codex CLI not found")
+            raise FileNotFoundError(CODEX_CLI_MISSING_MESSAGE)
 
         task = LoginTask(
             safe_name,

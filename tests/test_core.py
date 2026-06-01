@@ -12,7 +12,9 @@ sys.path.insert(0, str(ROOT / "src" / "core"))
 sys.path.insert(0, str(ROOT / "platforms" / "mac"))
 
 import account_manager
+import codex_cli
 import codex_config
+import login_manager
 import control_actions
 import proxy
 import quota_tracker
@@ -62,6 +64,63 @@ class ConfigTests(unittest.TestCase):
     def test_validate_rejects_zero_quota_weights(self):
         with self.assertRaises(ConfigError):
             validate({"quota_weight_5h": 0, "quota_weight_7d": 0})
+
+
+class CodexCliLocatorTests(unittest.TestCase):
+    def test_env_override_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = Path(tmp) / "codex.exe"
+            cli.write_text("exe\n")
+            env = {
+                "CODEX_CLI_PATH": str(cli),
+                "PATH": "",
+                "LOCALAPPDATA": str(Path(tmp) / "missing"),
+            }
+
+            self.assertEqual(codex_cli.find_codex_cli(env, platform_name="win32"), str(cli))
+
+    def test_windows_local_codex_bin_is_found_without_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local_app_data = Path(tmp)
+            cli = local_app_data / "OpenAI" / "Codex" / "bin" / "abc123" / "codex.exe"
+            cli.parent.mkdir(parents=True)
+            cli.write_text("exe\n")
+            env = {"PATH": "", "LOCALAPPDATA": str(local_app_data)}
+
+            self.assertEqual(codex_cli.find_codex_cli(env, platform_name="win32"), str(cli))
+
+    def test_windows_local_codex_bin_uses_newest_exe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local_app_data = Path(tmp)
+            old_cli = local_app_data / "OpenAI" / "Codex" / "bin" / "old" / "codex.exe"
+            new_cli = local_app_data / "OpenAI" / "Codex" / "bin" / "new" / "codex.exe"
+            old_cli.parent.mkdir(parents=True)
+            new_cli.parent.mkdir(parents=True)
+            old_cli.write_text("old\n")
+            new_cli.write_text("new\n")
+            os.utime(old_cli, (100, 100))
+            os.utime(new_cli, (200, 200))
+            env = {"PATH": "", "LOCALAPPDATA": str(local_app_data)}
+
+            self.assertEqual(codex_cli.find_codex_cli(env, platform_name="win32"), str(new_cli))
+
+    def test_missing_cli_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"PATH": "", "LOCALAPPDATA": str(Path(tmp) / "missing")}
+
+            self.assertIsNone(codex_cli.find_codex_cli(env, platform_name="win32"))
+
+    def test_login_manager_reports_clear_missing_cli_error(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        account_manager.ACCOUNTS_DIR = Path(tempfile.mkdtemp())
+        try:
+            with mock.patch("login_manager.find_codex_cli", return_value=None):
+                with self.assertRaises(FileNotFoundError) as exc:
+                    asyncio.run(login_manager.LoginManager().start("new_account"))
+            self.assertIn("Codex CLI not found", str(exc.exception))
+            self.assertIn("CODEX_CLI_PATH", str(exc.exception))
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
 
 
 class AccountTests(unittest.TestCase):

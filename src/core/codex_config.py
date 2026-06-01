@@ -67,13 +67,18 @@ def status(path: Optional[Path] = None) -> dict:
 def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
     config_path = path or CODEX_CONFIG_PATH
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    original = config_path.read_text() if config_path.exists() else ""
+    original = ""
+    if config_path.exists():
+        try:
+            original = config_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            original = config_path.read_text(encoding="utf-8-sig")
     backup_path = None
     if config_path.exists():
         backup_path = config_path.with_suffix(
             f"{config_path.suffix}.{int(time.time())}.bak"
         )
-        backup_path.write_text(original)
+        backup_path.write_text(original, encoding="utf-8")
 
     lines = original.splitlines()
     urls = proxy_urls()
@@ -99,7 +104,7 @@ def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
 
     text = "\n".join(lines).rstrip() + "\n"
     tmp_path = config_path.with_suffix(f"{config_path.suffix}.tmp")
-    tmp_path.write_text(text)
+    tmp_path.write_text(text, encoding="utf-8")
     tmp_path.replace(config_path)
     result = status(config_path)
     result["backup_path"] = str(backup_path) if backup_path else None
@@ -125,7 +130,11 @@ def _read_values(path: Path) -> dict:
     section = ""
     section_pattern = re.compile(r'^\s*\[(.+?)\]\s*$')
     pattern = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$')
-    for line in path.read_text().splitlines():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="utf-8-sig")
+    for line in content.splitlines():
         section_match = section_pattern.match(line)
         if section_match:
             section = section_match.group(1).strip()
