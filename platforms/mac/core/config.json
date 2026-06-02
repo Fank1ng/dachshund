@@ -1,0 +1,8 @@
+{
+  "port": 8800,
+  "rate_limit_cooldown": 60,
+  "rotation_strategy": "round_robin",
+  "max_retries": 10,
+  "quota_refresh_interval": 300,
+  "log_level": "INFO"
+}

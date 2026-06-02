@@ -153,6 +153,7 @@ def _sync_runtime_dir() -> None:
     if source == target:
         return
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    _sync_core_files(source, target)
     for name in COPY_FILES:
         src = _source_file(source, name)
         if src.exists():
@@ -169,6 +170,18 @@ def _sync_runtime_dir() -> None:
     _sync_accounts_dir(source / "accounts", target / "accounts")
 
 
+def _sync_core_files(source: Path, target: Path) -> None:
+    core = _platform_core_dir(source)
+    if not core.exists():
+        return
+    for src in core.glob("*.py"):
+        shutil.copy2(src, target / src.name)
+    config_src = core / "config.json"
+    config_dst = target / "config.json"
+    if config_src.exists() and not config_dst.exists():
+        shutil.copy2(config_src, config_dst)
+
+
 def _source_dir() -> Path:
     configured = os.environ.get(SOURCE_DIR_ENV)
     if configured:
@@ -179,26 +192,31 @@ def _source_dir() -> Path:
 
 
 def _source_file(source: Path, name: str) -> Path:
-    direct = source / name
-    if direct.exists():
-        return direct
-    core = source / "src" / "core" / name
-    if core.exists():
-        return core
-    mac = source / "platforms" / "mac" / name
-    if mac.exists():
-        return mac
-    return direct
+    for candidate in _source_file_candidates(source, name):
+        if candidate.exists():
+            return candidate
+    return source / name
 
 
 def _source_dir_entry(source: Path, name: str) -> Path:
+    for candidate in _source_file_candidates(source, name):
+        if candidate.exists():
+            return candidate
+    return source / name
+
+
+def _platform_core_dir(source: Path) -> Path:
+    core = source / "platforms" / "mac" / "core"
+    return core if core.exists() else source
+
+
+def _source_file_candidates(source: Path, name: str) -> tuple[Path, ...]:
+    mac_core = _platform_core_dir(source) / name
+    mac = source / "platforms" / "mac" / name
     direct = source / name
-    if direct.exists():
-        return direct
-    core = source / "src" / "core" / name
-    if core.exists():
-        return core
-    return direct
+    if name == "requirements.txt":
+        return (mac_core, mac, direct, source / "requirements.txt")
+    return (mac_core, mac, direct)
 
 
 def _app_bundle_dir() -> Path:

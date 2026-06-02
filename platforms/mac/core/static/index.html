@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Proxy Status</title>
+<link rel="icon" href="/static/icons/favicon.ico" sizes="any">
+<link rel="icon" href="/static/icons/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="manifest" href="/static/site.webmanifest">
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f3;--panel:#ffffff;--text:#202124;--muted:#6b6f76;--line:#deded8;--green:#16794c;--amber:#9a6200;--red:#b3261e;--blue:#0b57d0}
+@media (prefers-color-scheme:dark){:root{--bg:#171816;--panel:#20211f;--text:#f2f2ee;--muted:#a6aaa3;--line:#353733;--green:#73d19a;--amber:#e5b454;--red:#ff8a80;--blue:#8ab4f8}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1120px;margin:0 auto;padding:28px 18px 40px}
+header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:18px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:16px;margin:0 0 12px}
+p{margin:0;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+.num{font-size:26px;font-weight:700;margin-bottom:2px}
+.label{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 8px;vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.ok{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}.muted{color:var(--muted)}
+.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:12px}
+.bar{width:88px;height:6px;background:var(--line);border-radius:999px;overflow:hidden;margin:4px 0}
+.fill{height:100%;border-radius:999px;background:var(--green)}
+.fill.warn{background:var(--amber)}.fill.bad{background:var(--red)}
+.sub{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.toolbar{display:flex;gap:8px;align-items:center}
+button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:8px 11px;cursor:pointer}
+button:hover{border-color:var(--blue)}
+@media(max-width:760px){header{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Codex Proxy Status</h1>
+      <p>Web只做状态诊断。账号、服务和 Codex 配置请用本地 Codex Proxy Control App 管理。</p>
+    </div>
+    <div class="toolbar">
+      <button id="refresh-button" onclick="refreshQuota()">刷新</button>
+      <span id="refresh-status" class="sub">自动刷新中</span>
+    </div>
+  </header>
+
+  <section class="grid">
+    <div class="card"><div class="num" id="running">-</div><div class="label">代理状态</div></div>
+    <div class="card"><div class="num" id="accounts">-</div><div class="label">可用账号 / 总账号</div></div>
+    <div class="card"><div class="num" id="strategy">-</div><div class="label">选择策略</div></div>
+    <div class="card"><div class="num" id="requests">-</div><div class="label">总请求</div></div>
+  </section>
+
+  <section class="card">
+    <h2>账号状态</h2>
+    <div id="account-list" class="muted">加载中...</div>
+  </section>
+
+  <section class="card" style="margin-top:12px">
+    <h2>最近请求</h2>
+    <div id="recent" class="muted">加载中...</div>
+  </section>
+
+  <section class="card" style="margin-top:12px">
+    <h2>最近错误</h2>
+    <div id="errors" class="muted">加载中...</div>
+  </section>
+</main>
+
+<script>
+async function fetchJSON(path, options = {}) {
+  const response = await fetch(path, { cache: 'no-store', ...options });
+  const text = await response.text();
+  try { return JSON.parse(text); } catch { return { error: text || response.statusText }; }
+}
+
+async function refreshAll() {
+  const [status, accounts, quota] = await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/accounts'),
+    fetchJSON('/api/quota'),
+  ]);
+  renderStatus(status);
+  renderAccounts(Array.isArray(accounts) ? accounts : [], quota && !quota.error ? quota : {});
+}
+
+async function refreshQuota() {
+  const button = document.getElementById('refresh-button');
+  const status = document.getElementById('refresh-status');
+  button.disabled = true;
+  button.textContent = '刷新中...';
+  status.textContent = '正在拉取最新额度...';
+  try {
+    const result = await fetchJSON('/api/quota/refresh', { method: 'POST' });
+    await refreshAll();
+    const refreshed = Object.values(result.accounts || {}).filter(item => item.refreshed).length;
+    status.textContent = refreshed ? `已刷新 ${refreshed} 个账号：${new Date().toLocaleTimeString()}` : '刷新完成，但没有新数据';
+  } finally {
+    button.disabled = false;
+    button.textContent = '刷新';
+  }
+}
+
+function renderStatus(status) {
+  document.getElementById('running').textContent = status && !status.error ? '在线' : '异常';
+  document.getElementById('running').className = status && !status.error ? 'num ok' : 'num bad';
+  document.getElementById('accounts').textContent = `${status.active_accounts ?? '-'} / ${status.total_accounts ?? '-'}`;
+  document.getElementById('strategy').textContent = status.strategy || '-';
+  document.getElementById('requests').textContent = status.stats?.total_requests ?? '-';
+
+  const rows = (status.recent_requests || []).slice(0, 12);
+  if (!rows.length) {
+    document.getElementById('recent').innerHTML = '<p>暂无请求记录。</p>';
+  } else {
+    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>路径</th><th>ID</th></tr></thead><tbody>${
+      rows.map(row => `<tr>
+        <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
+        <td>${esc(row.account || '-')}</td>
+        <td>${statusLabel(row.status)}</td>
+        <td><code>${esc(row.path || '-')}</code></td>
+        <td><code>${esc(row.request_id || '-')}</code></td>
+      </tr>`).join('')
+    }</tbody></table>`;
+  }
+
+  const errors = (status.recent_errors || []).slice(0, 8);
+  if (!errors.length) {
+    document.getElementById('errors').innerHTML = '<p>暂无上游或流式错误。</p>';
+    return;
+  }
+  document.getElementById('errors').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>路径</th><th>错误</th><th>ID</th></tr></thead><tbody>${
+    errors.map(row => `<tr>
+      <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
+      <td>${esc(row.account || '-')}</td>
+      <td><code>${esc(row.path || '-')}</code></td>
+      <td>${esc(row.error || '-')}</td>
+      <td><code>${esc(row.request_id || '-')}</code></td>
+    </tr>`).join('')
+  }</tbody></table>`;
+}
+
+function renderAccounts(accounts, quota) {
+  if (!accounts.length) {
+    document.getElementById('account-list').innerHTML = '<p>未发现账号。请用本地 App 生成登录命令或导入当前账号。</p>';
+    return;
+  }
+  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
+    accounts.map(account => {
+      const q = quota?.[account.name] || null;
+      const summary = quotaSummary(q);
+      return `<tr>
+      <td><strong>${esc(account.name || '-')}</strong></td>
+      <td>${esc(account.email || '-')}</td>
+      <td>${accountState(account)}</td>
+      <td>${quotaCell(summary.fiveHour)}</td>
+      <td>${quotaCell(summary.sevenDay)}</td>
+      <td>${refreshCell(summary)}</td>
+      <td>${account.expires_at ? esc(new Date(account.expires_at * 1000).toLocaleString()) : '-'}</td>
+    </tr>`;
+    }).join('')
+  }</tbody></table>`;
+}
+
+function quotaSummary(data) {
+  if (data?.error) {
+    return {
+      fiveHour: { value: null, used: null, resetAt: null, note: '刷新中' },
+      sevenDay: { value: null, used: null, resetAt: null, note: '刷新中' },
+      fetchedAt: null,
+      planType: '',
+      unavailable: true,
+    };
+  }
+  const rateLimit = data?.rate_limit || {};
+  const primary = rateLimit.primary_window || null;
+  const secondary = rateLimit.secondary_window || null;
+  const fiveHour = quotaWindow(primary, data?.['5h_usage']);
+  let sevenDay = quotaWindow(secondary, data?.weekly_usage);
+  let sevenDayNote = '';
+  if (!sevenDay.value && data && ['free', 'go'].includes(String(data.plan_type || '').toLowerCase())) {
+    sevenDay = quotaWindow(primary, data?.['5h_usage']);
+    sevenDayNote = '共享窗口';
+  }
+  return {
+    fiveHour,
+    sevenDay: { ...sevenDay, note: sevenDay.note || sevenDayNote },
+    fetchedAt: numberOrNull(data?._fetched_at),
+    planType: data?.plan_type || '',
+  };
+}
+
+function quotaWindow(windowData, fallbackUsed) {
+  const used = numberOrNull(windowData?.used_percent ?? fallbackUsed);
+  const remaining = used == null ? null : clamp(100 - used, 0, 100);
+  return {
+    value: remaining,
+    used,
+    resetAt: numberOrNull(windowData?.reset_at),
+    note: '',
+  };
+}
+
+function quotaCell(item) {
+  if (item.value == null) return `<span class="muted">${esc(item.note || '无数据')}</span>`;
+  const cls = item.value <= 5 ? 'bad' : item.value <= 25 ? 'warn' : '';
+  const used = item.used == null ? '' : `<span class="sub">已用 ${formatPercent(item.used)}</span>`;
+  const note = item.note ? `<span class="sub">${esc(item.note)}</span>` : '';
+  return `<strong>${formatPercent(item.value)}</strong><div class="bar"><div class="fill ${cls}" style="width:${clamp(item.value, 0, 100)}%"></div></div>${used}${note}`;
+}
+
+function refreshCell(summary) {
+  if (summary.unavailable) return '<span class="muted">刷新中</span>';
+  const rows = [];
+  if (summary.fiveHour.resetAt) rows.push(`5h: ${formatTime(summary.fiveHour.resetAt)}`);
+  if (summary.sevenDay.resetAt) rows.push(`7d: ${formatTime(summary.sevenDay.resetAt)}`);
+  if (summary.fetchedAt) rows.push(`数据: ${formatTime(summary.fetchedAt)}`);
+  return rows.length ? rows.map(row => `<span class="sub">${esc(row)}</span>`).join('') : '<span class="muted">无数据</span>';
+}
+
+function statusLabel(code) {
+  const value = Number(code);
+  const cls = value >= 500 ? 'bad' : value >= 400 ? 'warn' : 'ok';
+  return `<span class="${cls}">${esc(code ?? '-')}</span>`;
+}
+
+function accountState(account) {
+  if (account.auth_error) return `<span class="bad">${esc(account.auth_error)}</span>`;
+  if (!account.has_tokens) return '<span class="bad">缺少 token</span>';
+  if (!account.enabled) return '<span class="warn">已禁用</span>';
+  if (account.rate_limited) return `<span class="warn">${esc(account.cooldown_reason || '冷却中')}</span>`;
+  return '<span class="ok">可用</span>';
+}
+
+function esc(value) {
+  return String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function formatPercent(value) {
+  return `${Math.round(value)}%`;
+}
+
+function formatTime(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
+</body>
+</html>

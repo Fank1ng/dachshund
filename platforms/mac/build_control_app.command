@@ -3,13 +3,13 @@ set -euo pipefail
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-CORE_DIR="$ROOT/src/core"
+CORE_DIR="$MAC_DIR/core"
 APP="$ROOT/Codex Proxy Control.app"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
 APP_ICON="$CORE_DIR/static/icons/AppIcon.icns"
-APP_VERSION="${APP_VERSION:-0.5.1}"
+APP_VERSION="${APP_VERSION:-0.5.0}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
@@ -57,23 +57,11 @@ if [ ! -f "$APP_ICON" ]; then
   exit 1
 fi
 
-for file in \
-  account_manager.py \
-  codex_config.py \
-  config.py \
-  config.json \
-  login_manager.py \
-  proxy.py \
-  proxy_core.py \
-  quota_tracker.py \
-  requirements.txt
-do
-  if [ "$file" = "requirements.txt" ]; then
-    cp "$ROOT/$file" "$RUNTIME/$file"
-  else
-    cp "$CORE_DIR/$file" "$RUNTIME/$file"
-  fi
+for file in "$CORE_DIR"/*.py; do
+  cp "$file" "$RUNTIME/$(basename "$file")"
 done
+cp "$CORE_DIR/config.json" "$RUNTIME/config.json"
+cp "$ROOT/requirements.txt" "$RUNTIME/requirements.txt"
 
 for file in \
   control_actions.py \

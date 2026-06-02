@@ -3,7 +3,7 @@ set -e
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-export PYTHONPATH="$ROOT/src/core:$MAC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$MAC_DIR/core:$MAC_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CODEX_PROXY_SOURCE_DIR="$ROOT"
 cd "$ROOT"
 python3 - <<'PY'
