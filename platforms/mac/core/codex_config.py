@@ -15,6 +15,10 @@ OPENAI_SECTION = f"model_providers.{PROVIDER_ID}"
 MODEL_PROVIDER_KEY = "model_provider"
 OPENAI_KEY = "base_url"
 CHATGPT_KEY = "chatgpt_base_url"
+STREAM_MAX_RETRIES_KEY = "stream_max_retries"
+STREAM_IDLE_TIMEOUT_MS_KEY = "stream_idle_timeout_ms"
+STREAM_MAX_RETRIES = 8
+STREAM_IDLE_TIMEOUT_MS = 600000
 
 
 def proxy_urls() -> dict:
@@ -33,11 +37,16 @@ def status(path: Optional[Path] = None) -> dict:
     values = _read_values(config_path)
     provider = values.get(MODEL_PROVIDER_KEY)
     chatgpt_backend_enabled = values.get(CHATGPT_KEY) == urls["chatgpt_base_url"]
+    stream_settings_enabled = (
+        values.get(STREAM_MAX_RETRIES_KEY) == STREAM_MAX_RETRIES
+        and values.get(STREAM_IDLE_TIMEOUT_MS_KEY) == STREAM_IDLE_TIMEOUT_MS
+    )
     codex_pool_enabled = (
         provider == PROVIDER_ID
         and values.get(f"{OPENAI_SECTION}.{OPENAI_KEY}") == urls["codex_base_url"]
         and values.get(f"{OPENAI_SECTION}.wire_api") == "responses"
         and values.get(f"{OPENAI_SECTION}.supports_websockets") is True
+        and stream_settings_enabled
     )
     legacy_codex_pool_enabled = (
         provider == PROVIDER_ID
@@ -71,6 +80,8 @@ def status(path: Optional[Path] = None) -> dict:
             f"{OPENAI_SECTION}.wire_api": values.get(f"{OPENAI_SECTION}.wire_api"),
             f"{OPENAI_SECTION}.requires_openai_auth": values.get(f"{OPENAI_SECTION}.requires_openai_auth"),
             f"{OPENAI_SECTION}.supports_websockets": values.get(f"{OPENAI_SECTION}.supports_websockets"),
+            STREAM_MAX_RETRIES_KEY: values.get(STREAM_MAX_RETRIES_KEY),
+            STREAM_IDLE_TIMEOUT_MS_KEY: values.get(STREAM_IDLE_TIMEOUT_MS_KEY),
             LEGACY_OPENAI_KEY: values.get(LEGACY_OPENAI_KEY),
             CHATGPT_KEY: values.get(CHATGPT_KEY),
         },
@@ -99,6 +110,8 @@ def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
         lines = _set_key(lines, LEGACY_OPENAI_KEY, None, comment_out=True)
         lines = _set_key(lines, MODEL_PROVIDER_KEY, PROVIDER_ID, comment_out=False, root_only=True)
         lines = _set_key(lines, CHATGPT_KEY, urls["chatgpt_base_url"], comment_out=False, root_only=True)
+        lines = _set_key(lines, STREAM_MAX_RETRIES_KEY, STREAM_MAX_RETRIES, comment_out=False, root_only=True)
+        lines = _set_key(lines, STREAM_IDLE_TIMEOUT_MS_KEY, STREAM_IDLE_TIMEOUT_MS, comment_out=False, root_only=True)
         for legacy_id in LEGACY_PROVIDER_IDS:
             lines = _comment_section(lines, f"model_providers.{legacy_id}")
         lines = _set_section_key(lines, OPENAI_SECTION, "name", "OpenAI")
@@ -110,6 +123,8 @@ def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
         lines = _set_key(lines, LEGACY_OPENAI_KEY, None, comment_out=True)
         lines = _set_key(lines, MODEL_PROVIDER_KEY, None, comment_out=True, root_only=True)
         lines = _set_key(lines, CHATGPT_KEY, None, comment_out=True, root_only=True)
+        lines = _set_key(lines, STREAM_MAX_RETRIES_KEY, None, comment_out=True, root_only=True)
+        lines = _set_key(lines, STREAM_IDLE_TIMEOUT_MS_KEY, None, comment_out=True, root_only=True)
         lines = _set_section_key(lines, OPENAI_SECTION, OPENAI_KEY, None, comment_out=True)
         lines = _set_section_key(lines, OPENAI_SECTION, "wire_api", None, comment_out=True)
         lines = _set_section_key(lines, OPENAI_SECTION, "requires_openai_auth", None, comment_out=True)
@@ -163,6 +178,8 @@ def _read_values(path: Path) -> dict:
             value = True
         elif raw_value.lower() == "false":
             value = False
+        elif raw_value.isdigit():
+            value = int(raw_value)
         else:
             value = raw_value
         if section:
@@ -175,6 +192,8 @@ def _read_values(path: Path) -> dict:
 def _format_value(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
     return f'"{value}"'
 
 

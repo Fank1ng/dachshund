@@ -28,6 +28,9 @@ from proxy_core import (
     _CodexCompletionTracker,
     _RetryableStreamError,
     _WebSocketRelayResult,
+    WEBSOCKET_HEARTBEAT_SECONDS,
+    _can_retry_websocket_without_forwarding,
+    _clear_ws_stream_interruption_cooldown,
     _connect_codex_upstream_websocket,
     _fetch_complete_codex_stream,
     _handle_codex_websocket,
@@ -1117,6 +1120,7 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(attempts[0]["reason"], "rate_limit_429")
         self.assertEqual(session.calls[0][0], "wss://chatgpt.com/backend-api/codex/responses")
         self.assertEqual(session.calls[0][1]["protocols"], ["chatgpt"])
+        self.assertEqual(session.calls[0][1]["heartbeat"], WEBSOCKET_HEARTBEAT_SECONDS)
 
     def test_websocket_handshake_401_refreshes_same_account(self):
         pool = AccountPool()
@@ -1153,6 +1157,22 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertFalse(account.is_rate_limited)
         self.assertEqual(session.calls[1][1]["headers"]["Authorization"], "Bearer new-token")
 
+    def test_websocket_relay_replays_cached_frames_to_upstream(self):
+        upstream_ws = _FakeWebSocket([
+            aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "event: response.completed\n", ""),
+        ])
+        client_ws = _FakeWebSocket()
+
+        result = asyncio.run(_relay_websocket_pair(
+            client_ws,
+            upstream_ws,
+            [("text", "response.create")],
+        ))
+
+        self.assertTrue(result.completed)
+        self.assertEqual(upstream_ws.sent, [("text", "response.create")])
+        self.assertEqual(result.replay_frames, [("text", "response.create")])
+
     def test_codex_websocket_prepares_client_before_connecting_upstream(self):
         pool = AccountPool()
         account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
@@ -1170,10 +1190,10 @@ class ProxyCoreTests(unittest.TestCase):
             error="",
         )
 
-        async def fake_relay(_client_ws, _upstream_ws):
+        async def fake_relay(_client_ws, _upstream_ws, _replay_frames):
             return relay_result
 
-        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws) as ws_factory, \
                 mock.patch("proxy_core._relay_websocket_pair", side_effect=fake_relay):
             result = asyncio.run(_handle_codex_websocket(
                 _FakeRequest(headers={"Sec-WebSocket-Protocol": "chatgpt"}, order=order),
@@ -1187,9 +1207,98 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(order[:2], ["prepare", "connect"])
         self.assertTrue(client_ws.prepared)
         self.assertTrue(client_ws.closed)
+        self.assertEqual(ws_factory.call_args.kwargs["heartbeat"], WEBSOCKET_HEARTBEAT_SECONDS)
         self.assertEqual(pool.recent_requests[0]["path"], "/v1/responses")
         self.assertEqual(pool.recent_requests[0]["status"], 101)
         self.assertEqual(pool.recent_requests[0]["transport"], "websocket")
+
+    def test_codex_websocket_retries_zero_output_upstream_close_without_closing_client(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        account_a = Account("a", root / "a" / "auth.json")
+        account_a.access_token = "token-a"
+        account_b = Account("b", root / "b" / "auth.json")
+        account_b.access_token = "token-b"
+        pool.accounts = [account_a, account_b]
+        client_ws = _FakeWebSocket()
+        upstream_a = _FakeWebSocket(close_code=1000)
+        upstream_b = _FakeWebSocket(close_code=1000)
+        session = _FakeWSSession([upstream_a, upstream_b])
+        first = _WebSocketRelayResult(
+            origin="upstream",
+            messages=0,
+            bytes_forwarded=0,
+            completed=False,
+            close_code=1000,
+            error="closed before completion",
+            replay_frames=[("text", "response.create")],
+        )
+        second = _WebSocketRelayResult(
+            origin="upstream",
+            messages=1,
+            bytes_forwarded=64,
+            completed=True,
+            close_code=1000,
+            error="",
+            replay_frames=[("text", "response.create")],
+        )
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+                mock.patch("proxy_core._relay_websocket_pair", side_effect=[first, second]) as relay:
+            result = asyncio.run(_handle_codex_websocket(
+                _FakeRequest(),
+                pool,
+                session,
+                "rid-ws-retry",
+                "/v1/responses",
+            ))
+
+        self.assertIs(result, client_ws)
+        self.assertTrue(client_ws.closed)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(relay.call_args_list[0].args[2], [])
+        self.assertEqual(relay.call_args_list[1].args[2], [("text", "response.create")])
+        self.assertTrue(account_a.is_rate_limited)
+        self.assertEqual(account_a.cooldown_reason, "ws_stream_interrupted")
+        self.assertFalse(account_b.is_rate_limited)
+        self.assertEqual(pool.recent_requests[0]["account"], "b")
+        self.assertEqual(pool.recent_requests[1]["account"], "a")
+
+    def test_codex_websocket_does_not_retry_after_forwarding_partial_upstream_output(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        account_a = Account("a", root / "a" / "auth.json")
+        account_a.access_token = "token-a"
+        account_b = Account("b", root / "b" / "auth.json")
+        account_b.access_token = "token-b"
+        pool.accounts = [account_a, account_b]
+        client_ws = _FakeWebSocket()
+        session = _FakeWSSession([_FakeWebSocket()])
+        partial = _WebSocketRelayResult(
+            origin="upstream",
+            messages=1,
+            bytes_forwarded=64,
+            completed=False,
+            close_code=1006,
+            error="closed after output",
+            replay_frames=[("text", "response.create")],
+        )
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+                mock.patch("proxy_core._relay_websocket_pair", return_value=partial):
+            result = asyncio.run(_handle_codex_websocket(
+                _FakeRequest(),
+                pool,
+                session,
+                "rid-ws-partial",
+                "/v1/responses",
+            ))
+
+        self.assertIs(result, client_ws)
+        self.assertTrue(client_ws.closed)
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(account_a.is_rate_limited)
+        self.assertFalse(account_b.is_rate_limited)
 
     def test_codex_websocket_upstream_failure_closes_client_without_http_500(self):
         pool = AccountPool()
@@ -1252,6 +1361,26 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertGreater(result.bytes_forwarded, 0)
         self.assertEqual(result.close_code, 1006)
 
+    def test_websocket_retry_predicate_allows_only_zero_output_upstream_close(self):
+        self.assertTrue(_can_retry_websocket_without_forwarding(_WebSocketRelayResult(
+            origin="upstream",
+            messages=0,
+            bytes_forwarded=0,
+            completed=False,
+        )))
+        self.assertFalse(_can_retry_websocket_without_forwarding(_WebSocketRelayResult(
+            origin="upstream",
+            messages=1,
+            bytes_forwarded=1,
+            completed=False,
+        )))
+        self.assertFalse(_can_retry_websocket_without_forwarding(_WebSocketRelayResult(
+            origin="client",
+            messages=0,
+            bytes_forwarded=0,
+            completed=False,
+        )))
+
     def test_websocket_interruption_records_error_and_cools_account(self):
         pool = AccountPool()
         account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
@@ -1278,6 +1407,17 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(account.cooldown_reason, "ws_stream_interrupted")
         self.assertIn("ws_stream_interrupted", pool.recent_errors[0]["error"])
         self.assertIn("messages=2", pool.recent_errors[0]["error"])
+
+    def test_completed_websocket_clears_previous_ws_interruption_cooldown(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+        account.rate_limited_until = 1
+        account.cooldown_reason = "ws_stream_interrupted"
+
+        _clear_ws_stream_interruption_cooldown(pool, account)
+
+        self.assertEqual(account.rate_limited_until, 0)
+        self.assertEqual(account.cooldown_reason, "")
 
 
 class CodexConfigTests(unittest.TestCase):
@@ -1320,6 +1460,8 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn('wire_api = "responses"', text)
         self.assertIn('requires_openai_auth = true', text)
         self.assertIn('supports_websockets = true', text)
+        self.assertIn("stream_max_retries = 8", text)
+        self.assertIn("stream_idle_timeout_ms = 600000", text)
         codex_config.set_enabled(False, config_path)
         self.assertFalse(codex_config.status(config_path)["enabled"])
 
@@ -1340,6 +1482,26 @@ class CodexConfigTests(unittest.TestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["mode"], "legacy_codex_pool_provider")
         self.assertTrue(status["legacy_provider_mode_enabled"])
+
+    def test_ensure_enabled_rewrites_config_missing_realtime_stream_settings(self):
+        config_path = Path(tempfile.mkdtemp()) / "config.toml"
+        config_path.write_text(
+            'model_provider = "codex-account-pool"\n'
+            'chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"\n'
+            "[model_providers.codex-account-pool]\n"
+            'base_url = "http://127.0.0.1:8800/v1"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+            "supports_websockets = true\n"
+        )
+
+        self.assertFalse(codex_config.status(config_path)["enabled"])
+        result = codex_config.ensure_enabled(True, config_path)
+
+        self.assertTrue(result["enabled"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["current"]["stream_max_retries"], 8)
+        self.assertEqual(result["current"]["stream_idle_timeout_ms"], 600000)
 
     def test_ensure_enabled_does_not_rewrite_matching_config(self):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"

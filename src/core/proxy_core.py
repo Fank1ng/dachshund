@@ -6,7 +6,7 @@ import logging
 import random
 import time
 import uuid
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 from aiohttp import web
@@ -51,6 +51,7 @@ class _WebSocketRelayResult:
     completed: bool
     close_code: Optional[int] = None
     error: str = ""
+    replay_frames: Optional[list[tuple[str, Union[bytes, str]]]] = None
 
 
 UPSTREAM_MAP = {
@@ -60,6 +61,7 @@ UPSTREAM_MAP = {
 V1_RESPONSES_PATH = "/v1/responses"
 CODEX_RESPONSES_PATH = "/backend-api/codex/responses"
 CODEX_COMPLETED_MARKER = b"response.completed"
+WEBSOCKET_HEARTBEAT_SECONDS = 20
 
 
 class _CodexCompletionTracker:
@@ -453,6 +455,20 @@ def _record_ws_stream_interrupted(
     pool.mark_rate_limited(account, cooldown, "ws_stream_interrupted")
 
 
+def _clear_ws_stream_interruption_cooldown(pool: AccountPool, account) -> None:
+    if getattr(account, "cooldown_reason", "") == "ws_stream_interrupted":
+        pool.clear_cooldown(account)
+
+
+def _can_retry_websocket_without_forwarding(result: _WebSocketRelayResult) -> bool:
+    return (
+        result.origin == "upstream"
+        and not result.completed
+        and result.messages == 0
+        and result.bytes_forwarded == 0
+    )
+
+
 def _record_stream_interrupted(
     pool: AccountPool,
     account,
@@ -589,16 +605,19 @@ async def _connect_codex_upstream_websocket(
     upstream_session: aiohttp.ClientSession,
     request_id: str,
     path: str,
+    tried_accounts: Optional[set[str]] = None,
+    attempts: Optional[list[dict]] = None,
 ) -> tuple[Optional[_WebSocketConnectResult], list[dict], Optional[web.Response]]:
     base_headers = _clean_websocket_headers(dict(request.headers))
     protocols = _websocket_protocols(dict(request.headers))
     target_url = _websocket_target_url(path, request.query_string)
     cooldown = get("rate_limit_cooldown")
     max_retries = get("max_retries")
-    tried_accounts: set[str] = set()
-    attempts: list[dict] = []
+    tried_accounts = tried_accounts if tried_accounts is not None else set()
+    attempts = attempts if attempts is not None else []
 
-    for retry_idx in range(max_retries):
+    for _ in range(max_retries):
+        retry_idx = len(tried_accounts)
         account = pool.pick(exclude=tried_accounts)
         if account is None:
             if tried_accounts:
@@ -626,6 +645,7 @@ async def _connect_codex_upstream_websocket(
                     receive_timeout=None,
                     autoclose=True,
                     autoping=True,
+                    heartbeat=WEBSOCKET_HEARTBEAT_SECONDS,
                 )
                 return _WebSocketConnectResult(
                     account=account,
@@ -716,8 +736,21 @@ async def _connect_codex_upstream_websocket(
     return None, attempts, _upstream_failure_response(request_id, path, attempts, "websocket upstream unavailable")
 
 
-async def _relay_websocket_pair(client_ws, upstream_ws) -> _WebSocketRelayResult:
+async def _send_ws_frame(upstream_ws, frame: tuple[str, Union[bytes, str]]) -> None:
+    kind, data = frame
+    if kind == "text":
+        await upstream_ws.send_str(str(data))
+    else:
+        await upstream_ws.send_bytes(bytes(data))
+
+
+async def _relay_websocket_pair(
+    client_ws,
+    upstream_ws,
+    replay_frames: Optional[list[tuple[str, Union[bytes, str]]]] = None,
+) -> _WebSocketRelayResult:
     tracker = _CodexCompletionTracker()
+    sent_to_upstream = list(replay_frames or [])
     metrics = {
         "messages": 0,
         "bytes_forwarded": 0,
@@ -725,6 +758,22 @@ async def _relay_websocket_pair(client_ws, upstream_ws) -> _WebSocketRelayResult
         "close_code": None,
         "error": "",
     }
+
+    try:
+        for frame in replay_frames or []:
+            await _send_ws_frame(upstream_ws, frame)
+    except Exception as e:
+        metrics["error"] = str(e)
+        metrics["close_code"] = getattr(upstream_ws, "close_code", None)
+        return _WebSocketRelayResult(
+            origin="upstream",
+            messages=0,
+            bytes_forwarded=0,
+            completed=False,
+            close_code=metrics["close_code"],
+            error=str(metrics["error"]),
+            replay_frames=sent_to_upstream,
+        )
 
     async def upstream_to_client() -> None:
         async for msg in upstream_ws:
@@ -747,8 +796,10 @@ async def _relay_websocket_pair(client_ws, upstream_ws) -> _WebSocketRelayResult
     async def client_to_upstream() -> None:
         async for msg in client_ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                sent_to_upstream.append(("text", msg.data))
                 await upstream_ws.send_str(msg.data)
             elif msg.type == aiohttp.WSMsgType.BINARY:
+                sent_to_upstream.append(("binary", msg.data))
                 await upstream_ws.send_bytes(msg.data)
             elif msg.type == aiohttp.WSMsgType.CLOSE:
                 break
@@ -781,6 +832,7 @@ async def _relay_websocket_pair(client_ws, upstream_ws) -> _WebSocketRelayResult
         completed=bool(metrics["completed"]),
         close_code=metrics["close_code"],
         error=str(metrics["error"]),
+        replay_frames=sent_to_upstream,
     )
 
 
@@ -793,6 +845,7 @@ async def _handle_codex_websocket(
 ) -> web.StreamResponse:
     client_ws = web.WebSocketResponse(
         protocols=_websocket_protocols(dict(request.headers)),
+        heartbeat=WEBSOCKET_HEARTBEAT_SECONDS,
     )
     client_ws.headers["x-request-id"] = request_id
     try:
@@ -802,82 +855,106 @@ async def _handle_codex_websocket(
         pool.record_error(path, detail, None, request_id, 0)
         return web.Response(status=499, headers={"x-request-id": request_id})
 
-    connected, attempts, failure = await _connect_codex_upstream_websocket(
-        request,
-        pool,
-        upstream_session,
-        request_id,
-        path,
-    )
-    if failure is not None:
-        detail = (
-            "ws_handshake_failed: websocket upstream unavailable; "
-            f"attempts={len(attempts)}"
-        )
-        pool.record_error(path, detail, None, request_id, len(attempts))
-        await _close_websocket_safely(
-            client_ws,
-            code=aiohttp.WSCloseCode.TRY_AGAIN_LATER,
-            message=detail,
-        )
-        return client_ws
-
-    account = connected.account
-    upstream_ws = connected.upstream_ws
-    if getattr(client_ws, "closed", False):
-        await upstream_ws.close()
-        detail = "ws_client_disconnected: client websocket closed before upstream relay"
-        pool.record_error(path, detail, account, request_id, connected.retry_idx)
-        return client_ws
-
-    try:
-        result = await _relay_websocket_pair(client_ws, upstream_ws)
-    finally:
-        await upstream_ws.close()
-        await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
-
-    duration_ms = (time.monotonic() - connected.started) * 1000
-    pool.record_request(
-        account,
-        path,
-        101,
-        duration_ms,
-        connected.retry_idx,
-        request_id,
-        transport="websocket",
-    )
-    if result.origin == "upstream" and not result.completed:
-        _record_attempt(
-            attempts,
-            account,
-            "ws_stream_interrupted",
-            messages=result.messages,
-            bytes_forwarded=result.bytes_forwarded,
-            response_completed=result.completed,
-            close_code=result.close_code,
-            error=result.error or "websocket closed before response.completed",
-            retry_index=connected.retry_idx,
-            transport="websocket",
-        )
-        _record_ws_stream_interrupted(
+    tried_accounts: set[str] = set()
+    attempts: list[dict] = []
+    replay_frames: list[tuple[str, Union[bytes, str]]] = []
+    while True:
+        connected, attempts, failure = await _connect_codex_upstream_websocket(
+            request,
             pool,
+            upstream_session,
+            request_id,
+            path,
+            tried_accounts=tried_accounts,
+            attempts=attempts,
+        )
+        if failure is not None:
+            detail = (
+                "ws_handshake_failed: websocket upstream unavailable; "
+                f"attempts={len(attempts)}"
+            )
+            pool.record_error(path, detail, None, request_id, len(attempts))
+            await _close_websocket_safely(
+                client_ws,
+                code=aiohttp.WSCloseCode.TRY_AGAIN_LATER,
+                message=detail,
+            )
+            return client_ws
+
+        account = connected.account
+        upstream_ws = connected.upstream_ws
+        if getattr(client_ws, "closed", False):
+            await upstream_ws.close()
+            detail = "ws_client_disconnected: client websocket closed before upstream relay"
+            pool.record_error(path, detail, account, request_id, connected.retry_idx)
+            return client_ws
+
+        try:
+            result = await _relay_websocket_pair(client_ws, upstream_ws, replay_frames)
+        finally:
+            await upstream_ws.close()
+
+        duration_ms = (time.monotonic() - connected.started) * 1000
+        pool.record_request(
             account,
             path,
-            request_id,
+            101,
+            duration_ms,
             connected.retry_idx,
-            result,
-            _codex_stream_retry_cooldown(),
+            request_id,
+            transport="websocket",
         )
-    elif result.origin == "client" and not result.completed:
-        detail = _websocket_error_detail(
-            "ws_client_disconnected",
-            result.error or "client websocket closed",
-            result.messages,
-            result.bytes_forwarded,
-            result.completed,
-            result.close_code,
-        )
-        pool.record_error(path, detail, account, request_id, connected.retry_idx)
+        if result.completed:
+            _clear_ws_stream_interruption_cooldown(pool, account)
+            await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
+            return client_ws
+        if result.origin == "upstream":
+            _record_attempt(
+                attempts,
+                account,
+                "ws_stream_interrupted",
+                messages=result.messages,
+                bytes_forwarded=result.bytes_forwarded,
+                response_completed=result.completed,
+                close_code=result.close_code,
+                error=result.error or "websocket closed before response.completed",
+                retry_index=connected.retry_idx,
+                transport="websocket",
+            )
+            _record_ws_stream_interrupted(
+                pool,
+                account,
+                path,
+                request_id,
+                connected.retry_idx,
+                result,
+                _codex_stream_retry_cooldown(),
+            )
+            if _can_retry_websocket_without_forwarding(result) and not getattr(client_ws, "closed", False):
+                replay_frames = list(result.replay_frames or replay_frames)
+                logger.info(
+                    "retrying websocket without closing client request_id=%s account=%s "
+                    "path=%s replay_frames=%s",
+                    request_id,
+                    account.name,
+                    path,
+                    len(replay_frames),
+                )
+                continue
+            await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
+            return client_ws
+        if result.origin == "client":
+            detail = _websocket_error_detail(
+                "ws_client_disconnected",
+                result.error or "client websocket closed",
+                result.messages,
+                result.bytes_forwarded,
+                result.completed,
+                result.close_code,
+            )
+            pool.record_error(path, detail, account, request_id, connected.retry_idx)
+            await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
+            return client_ws
     return client_ws
 
 

@@ -88,3 +88,38 @@ accounts/{name}/quota.json  # Latest usage data (auto-generated, git-ignored)
 2. Terminal: run `CODEX_HOME=accounts/{name} codex login`
 3. Browser: sign in with the new OpenAI account
 4. Web UI: Rescan
+
+## Stable Instructions
+
+- Keep durable project rules, setup commands, coding conventions, and review expectations here.
+- Do not store secrets in this file.
+
+## Active Handoff
+
+- Current task: Configure agent bridge for the current project.
+- Status: Complete.
+- Completed:
+  - Initialized agent bridge with the bundled CLI.
+  - Added shared handoff sections to `AGENTS.md`.
+  - Created `CLAUDE.md` as a symlink to `AGENTS.md`.
+  - Verified bridge status reports `Claude bridge: yes`.
+  - Removed the untracked `.claude/` directory at user request.
+- Next steps:
+  - Use `AGENTS.md` as the shared source of truth for future Codex and Claude Code handoffs.
+- Changed files:
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `.claude/` removed
+- Commands run:
+  - `node /Users/fank1ng/.codex/plugins/cache/personal/agent-bridge/0.1.0/scripts/agent-bridge.js init /Users/fank1ng/Desktop/codexproxyapi`
+  - `node /Users/fank1ng/.codex/plugins/cache/personal/agent-bridge/0.1.0/scripts/agent-bridge.js status /Users/fank1ng/Desktop/codexproxyapi`
+  - `rm -rf .claude`
+- Blockers:
+  - None.
+
+## Session Log
+
+<!-- agent-bridge:session-log max=5 -->
+- 2026-06-07 Configured agent bridge: AGENTS.md now has Active Handoff sections and CLAUDE.md symlinks to it.
+- Initialized shared Codex + Claude Code handoff file.
+<!-- /agent-bridge:session-log -->
