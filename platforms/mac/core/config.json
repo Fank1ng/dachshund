@@ -10,5 +10,7 @@
   "codex_hybrid_probe_seconds": 8,
   "codex_hybrid_probe_bytes": 262144,
   "codex_stream_retry_cooldown": 0,
+  "quota_weight_5h": 0.5,
+  "quota_weight_7d": 0.5,
   "log_level": "INFO"
 }

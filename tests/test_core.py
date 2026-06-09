@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import sys
 import asyncio
 import tempfile
@@ -85,6 +86,11 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cfg["quota_tracker_enabled"])
         self.assertEqual(cfg["quota_weight_5h"], 0.8)
         self.assertEqual(cfg["quota_weight_7d"], 0.2)
+
+    def test_validate_defaults_to_even_quota_weights(self):
+        cfg = validate({})
+        self.assertEqual(cfg["quota_weight_5h"], 0.5)
+        self.assertEqual(cfg["quota_weight_7d"], 0.5)
 
     def test_validate_rejects_invalid_quota_tracker_flag(self):
         with self.assertRaises(ConfigError):
@@ -358,6 +364,16 @@ class ControlActionsTests(unittest.TestCase):
 
         self.assertEqual(result["error"], "codex_app_missing")
         self.assertIn("Codex App", result["codex_cli_error"])
+
+    def test_wait_for_proxy_waits_for_expected_version(self):
+        with mock.patch("control_actions.proxy_status", side_effect=[
+            {"running": True, "version": "0.5.2"},
+            {"running": True, "version": "0.5.3"},
+        ]) as proxy_status, mock.patch("control_actions.time.sleep"):
+            result = control_actions.wait_for_proxy(timeout=3, expected_version="0.5.3")
+
+        self.assertEqual(result["version"], "0.5.3")
+        self.assertEqual(proxy_status.call_count, 2)
 
     def test_render_output_json_keeps_machine_readable_keys(self):
         payload = {
@@ -1523,6 +1539,51 @@ class ServiceManagerTests(unittest.TestCase):
     def test_inside_launchagent_detects_service_name(self):
         with mock.patch.dict(os.environ, {"XPC_SERVICE_NAME": service_manager.LABEL}):
             self.assertTrue(service_manager._inside_launchagent())
+
+    def test_status_marks_old_launchagent_environment_for_repair(self):
+        source = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        app = Path(tempfile.mkdtemp()) / "Codex Proxy Control.app"
+        old_app = Path(tempfile.mkdtemp()) / "Old Codex Proxy Control.app"
+        plist_path = Path(tempfile.mkdtemp()) / "com.fank1ng.codexproxyapi.plist"
+        (source / "proxy.py").write_text("# source\n")
+        (app / "Contents").mkdir(parents=True)
+        (old_app / "Contents").mkdir(parents=True)
+        plist_path.write_bytes(plistlib.dumps({
+            "Label": service_manager.LABEL,
+            "ProgramArguments": [sys.executable, str(runtime / "proxy.py")],
+            "WorkingDirectory": str(runtime),
+            "EnvironmentVariables": {
+                service_manager.SOURCE_DIR_ENV: str(source / "old-runtime"),
+                service_manager.APP_BUNDLE_ENV: str(old_app),
+            },
+        }))
+
+        with mock.patch.object(service_manager, "PLIST_PATH", plist_path), \
+                mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                mock.patch.object(service_manager, "_launchctl_print", return_value=mock.Mock(returncode=0)), \
+                mock.patch.dict(os.environ, {
+                    service_manager.SOURCE_DIR_ENV: str(source),
+                    service_manager.APP_BUNDLE_ENV: str(app),
+                }):
+            result = service_manager.status()
+
+        self.assertTrue(result["needs_repair"])
+        self.assertIn(f"{service_manager.SOURCE_DIR_ENV.lower()}_mismatch", result["repair_reasons"])
+        self.assertIn(f"{service_manager.APP_BUNDLE_ENV.lower()}_mismatch", result["repair_reasons"])
+        self.assertEqual(result["installed_source_dir"], str(source / "old-runtime"))
+        self.assertEqual(result["installed_app_bundle"], str(old_app))
+
+    def test_ensure_running_repairs_installed_launchagent_with_stale_environment(self):
+        with mock.patch.object(service_manager, "status", return_value={
+            "installed": True,
+            "loaded": True,
+            "needs_repair": True,
+        }), mock.patch.object(service_manager, "install", return_value={"installed": True}) as install:
+            result = service_manager.ensure_running()
+
+        self.assertEqual(result, {"installed": True})
+        install.assert_called_once_with(sync=False)
 
     def test_sync_runtime_dir_uses_configured_source(self):
         source = Path(tempfile.mkdtemp())

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -150,14 +151,25 @@ def proxy_status(timeout: float = 3.0) -> Optional[dict]:
     return fetch_json_url(STATUS_URL, timeout)
 
 
-def wait_for_proxy(timeout: float = 25.0) -> Optional[dict]:
+def wait_for_proxy(timeout: float = 25.0, expected_version: Optional[str] = None) -> Optional[dict]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = proxy_status(timeout=2)
-        if status:
+        if status and (not expected_version or status.get("version") == expected_version):
             return status
         time.sleep(0.5)
     return None
+
+
+def source_app_version(source_dir: Optional[str] = None) -> str:
+    source = Path(source_dir).expanduser() if source_dir else service_manager._source_dir()
+    proxy_file = service_manager._source_file(source, "proxy.py")
+    try:
+        text = proxy_file.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = re.search(r'^APP_VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.MULTILINE)
+    return match.group(1) if match else ""
 
 
 def _localized_value(value):
@@ -328,8 +340,12 @@ def restart_proxy() -> dict:
 
 
 def apply_update() -> dict:
+    expected_version = source_app_version()
     service = service_manager.install(sync=True)
-    proxy = wait_for_proxy()
+    restart_started = False
+    if not service.get("restart_required"):
+        restart_started = service_manager.restart()
+    proxy = wait_for_proxy(expected_version=expected_version or None)
     return {
         "action": "apply_update",
         "installed": service.get("installed"),
@@ -338,6 +354,9 @@ def apply_update() -> dict:
         "running": bool(proxy),
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "version": proxy.get("version") if proxy else None,
+        "expected_version": expected_version,
+        "restart_started": restart_started,
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
         "restart_required": service.get("restart_required"),

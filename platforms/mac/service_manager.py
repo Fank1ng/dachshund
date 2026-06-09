@@ -39,13 +39,14 @@ def status() -> dict:
     loaded = _launchctl_print().returncode == 0
     source = _source_dir()
     runtime_is_source = source.resolve() == RUNTIME_DIR.resolve()
-    installed_program = _installed_program()
+    installed_plist = _installed_plist()
+    expected_plist = _plist()
+    installed_args = installed_plist.get("ProgramArguments") or []
+    installed_env = installed_plist.get("EnvironmentVariables") or {}
+    installed_program = str(installed_args[1]) if len(installed_args) >= 2 else ""
     expected_program = str(RUNTIME_DIR / "proxy.py")
-    needs_repair = bool(
-        PLIST_PATH.exists()
-        and installed_program
-        and Path(installed_program).expanduser() != Path(expected_program)
-    )
+    repair_reasons = _repair_reasons(installed_plist, expected_plist)
+    needs_repair = bool(PLIST_PATH.exists() and repair_reasons)
     return {
         "supported": sys.platform == "darwin",
         "label": LABEL,
@@ -60,8 +61,13 @@ def status() -> dict:
         "installed": PLIST_PATH.exists(),
         "loaded": loaded,
         "installed_program": installed_program,
+        "installed_python": str(installed_args[0]) if installed_args else "",
+        "installed_source_dir": str(installed_env.get(SOURCE_DIR_ENV, "")),
+        "installed_app_bundle": str(installed_env.get(APP_BUNDLE_ENV, "")),
+        "installed_pythonpath": str(installed_env.get("PYTHONPATH", "")),
         "expected_program": expected_program,
         "needs_repair": needs_repair,
+        "repair_reasons": repair_reasons,
         "log_path": str(LOG_PATH),
     }
 
@@ -289,6 +295,60 @@ def _inside_launchagent() -> bool:
     return os.environ.get("XPC_SERVICE_NAME") == LABEL
 
 
+def _installed_plist() -> dict:
+    if not PLIST_PATH.exists():
+        return {}
+    try:
+        with open(PLIST_PATH, "rb") as f:
+            data = plistlib.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _repair_reasons(installed: dict, expected: dict) -> list[str]:
+    if not PLIST_PATH.exists():
+        return []
+    if not installed:
+        return ["plist_unreadable"]
+
+    reasons = []
+    installed_args = installed.get("ProgramArguments") or []
+    expected_args = expected.get("ProgramArguments") or []
+    if len(installed_args) < 2:
+        reasons.append("program_arguments_missing")
+    elif len(expected_args) >= 2:
+        if not _same_path(installed_args[0], expected_args[0]):
+            reasons.append("python_mismatch")
+        if not _same_path(installed_args[1], expected_args[1]):
+            reasons.append("program_mismatch")
+
+    installed_workdir = installed.get("WorkingDirectory")
+    expected_workdir = expected.get("WorkingDirectory")
+    if installed_workdir or expected_workdir:
+        if not _same_path(installed_workdir, expected_workdir):
+            reasons.append("working_directory_mismatch")
+
+    installed_env = installed.get("EnvironmentVariables") or {}
+    expected_env = expected.get("EnvironmentVariables") or {}
+    env_path_keys = (SOURCE_DIR_ENV, APP_BUNDLE_ENV, PYTHON_ENV, "PYTHONPATH")
+    for key in env_path_keys:
+        installed_value = installed_env.get(key)
+        expected_value = expected_env.get(key)
+        if installed_value or expected_value:
+            if not _same_path(installed_value, expected_value):
+                reasons.append(f"{key.lower()}_mismatch")
+    return reasons
+
+
+def _same_path(left, right) -> bool:
+    if not left and not right:
+        return True
+    if not left or not right:
+        return False
+    return Path(str(left)).expanduser().resolve() == Path(str(right)).expanduser().resolve()
+
+
 def _sync_accounts_dir(source: Path, target: Path) -> None:
     if not source.exists():
         return
@@ -316,16 +376,9 @@ def _launchctl_print() -> subprocess.CompletedProcess:
 
 
 def _installed_program() -> str:
-    if not PLIST_PATH.exists():
-        return ""
-    try:
-        with open(PLIST_PATH, "rb") as f:
-            data = plistlib.load(f)
-        args = data.get("ProgramArguments") or []
-        if len(args) >= 2:
-            return str(args[1])
-    except Exception:
-        return ""
+    args = _installed_plist().get("ProgramArguments") or []
+    if len(args) >= 2:
+        return str(args[1])
     return ""
 
 
