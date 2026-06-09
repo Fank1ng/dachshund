@@ -34,7 +34,7 @@ import service_manager
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.4 - 2026-06-10
+
+- Fixed macOS update repair detection for LaunchAgent source, app bundle, Python, and Python path mismatches.
+- Made macOS apply-update wait for the newly packaged proxy version before reporting success.
+- Changed most-available quota weighting to 5h/7d = 5:5 for new default configs.
+
 ## v0.5.3 - 2026-06-09
 
 - Fixed Codex CLI compact requests so `/v1/responses/compact` no longer requires a `response.completed` event before returning a successful compact response.
