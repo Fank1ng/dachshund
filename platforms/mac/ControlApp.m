@@ -479,7 +479,7 @@ static NSString *CPRelativeTime(id epochValue) {
     self.toolbarStack.alignment = NSLayoutAttributeCenterY;
     self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
-    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
+    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复/更新后台" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"额度" symbol:@"chart.bar" selector:@selector(refreshQuotaAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Web" symbol:@"safari" selector:@selector(openWebAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
@@ -631,12 +631,15 @@ static NSString *CPRelativeTime(id epochValue) {
 
     BOOL runtimeReady = CPBool(self.statusSnapshot[@"runtime_exists"]) && CPBool(self.statusSnapshot[@"resource_runtime_exists"]);
     BOOL cliReady = CPBool(self.statusSnapshot[@"codex_cli_found"]);
-    BOOL serviceReady = CPBool(self.statusSnapshot[@"installed"]) && CPBool(self.statusSnapshot[@"loaded"]);
+    BOOL serviceReady = CPBool(self.statusSnapshot[@"installed"]) && CPBool(self.statusSnapshot[@"loaded"])
+        && !CPBool(self.statusSnapshot[@"needs_repair"])
+        && !CPBool(self.statusSnapshot[@"version_mismatch"])
+        && !CPBool(self.statusSnapshot[@"migration_required"]);
     BOOL proxyReady = CPBool(self.statusSnapshot[@"enabled"]);
     NSString *cliDetail = cliReady
         ? CPDisplayString(self.statusSnapshot[@"codex_cli"])
         : CPDisplayString(self.statusSnapshot[@"codex_cli_error"]);
-    NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动”安装并启动";
+    NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动/修复/更新后台”安装、修复或更新";
     NSString *proxyDetail = proxyReady ? @"Codex 已配置为代理模式" : @"点击“启用代理”写入 Codex 配置";
 
     [stack addArrangedSubview:[self setupStatusLineWithTitle:@"运行资源" detail:runtimeReady ? @"运行目录已准备" : @"正在准备或缺少 App 内置资源" ok:runtimeReady]];
@@ -1904,6 +1907,10 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)performAction:(NSArray<NSString *> *)args label:(NSString *)label refreshAfter:(BOOL)refreshAfter {
+    [self performAction:args label:label refreshAfter:refreshAfter fromBundle:NO];
+}
+
+- (void)performAction:(NSArray<NSString *> *)args label:(NSString *)label refreshAfter:(BOOL)refreshAfter fromBundle:(BOOL)fromBundle {
     if (self.busy) {
         return;
     }
@@ -1911,7 +1918,9 @@ static NSString *CPRelativeTime(id epochValue) {
     [self appendLog:[NSString stringWithFormat:@"$ %@", label]];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *raw = nil;
-        NSDictionary *result = [self runPythonJSONSync:args rawText:&raw];
+        NSDictionary *result = fromBundle
+            ? [self runBundleActionJSONSync:args rawText:&raw]
+            : [self runPythonJSONSync:args rawText:&raw];
         NSString *body = CPPrettyJSON(result ?: @{@"output": raw ?: @""});
         [self writeResultWithTitle:label body:body];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1933,7 +1942,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)repairAction:(id)sender {
-    [self performAction:@[@"repair"] label:@"启动" refreshAfter:YES];
+    [self performAction:@[@"repair"] label:@"启动/修复/更新后台" refreshAfter:YES fromBundle:YES];
 }
 
 - (void)enableProxyAction:(id)sender {
@@ -1952,11 +1961,11 @@ static NSString *CPRelativeTime(id epochValue) {
     if ([self showCodexMissingAlertIfNeededForCLI:NO openApp:YES]) {
         return;
     }
-    [self performAction:@[@"repair-open-codex"] label:@"打开 Codex" refreshAfter:YES];
+    [self performAction:@[@"repair-open-codex"] label:@"打开 Codex" refreshAfter:YES fromBundle:YES];
 }
 
 - (void)openWebAction:(id)sender {
-    [self performAction:@[@"repair-open-web"] label:@"打开网页状态页" refreshAfter:YES];
+    [self performAction:@[@"repair-open-web"] label:@"打开网页状态页" refreshAfter:YES fromBundle:YES];
 }
 
 - (void)strategyAction:(NSSegmentedControl *)sender {
@@ -2369,6 +2378,14 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (NSDictionary *)runApplyUpdateJSONSyncRawText:(NSString **)rawText {
+    return [self runBundleActionJSONSync:@[@"apply-update"] rawText:rawText];
+}
+
+// Run a control action from the pristine App bundle copy (not the runtime copy).
+// The runtime copy started life as a clone of the old 0.5.4 runtime, so running
+// repair/install logic from there can execute stale code that fails to fully
+// retire the legacy service. The bundle copy is always the newest logic.
+- (NSDictionary *)runBundleActionJSONSync:(NSArray<NSString *> *)args rawText:(NSString **)rawText {
     NSString *script = [self.resourceRuntimeDir stringByAppendingPathComponent:@"control_actions.py"];
     NSDictionary *environment = [self taskEnvironmentForSourceDir:self.resourceRuntimeDir
                                                includeProxyPython:NO
@@ -2376,7 +2393,7 @@ static NSString *CPRelativeTime(id epochValue) {
     return [self runPythonJSONSyncWithScript:script
                             workingDirectory:self.resourceRuntimeDir
                                   executable:[self pythonExecutablePreferRuntime:NO]
-                                        args:@[@"apply-update"]
+                                        args:args
                                  environment:environment
                                      rawText:rawText];
 }

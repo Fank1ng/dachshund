@@ -35,7 +35,7 @@ from usage_stats import summary as usage_summary
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.6.0"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 

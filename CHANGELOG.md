@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.0 - 2026-06-10
+
+- Hardened macOS update sync with staging validation, rollback, and update locking.
+- Updated macOS app branding, runtime paths, and usage tracking for the XiaoLaChang release.
+- Fully retire the legacy LaunchAgent on install (bootout, disable, remove plist, and move the old runtime aside) so the old service stops fighting for port 8800.
+- Run the repair/open actions from the pristine app bundle so a stale runtime can self-heal instead of only apply-update working.
+
 ## v0.5.4 - 2026-06-10
 
 - Fixed macOS update repair detection for LaunchAgent source, app bundle, Python, and Python path mismatches.

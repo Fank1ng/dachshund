@@ -60,16 +60,32 @@ class RuntimeSyncError(RuntimeError):
 
 def status() -> dict:
     loaded = _launchctl_print().returncode == 0
+    legacy_loaded = _legacy_launchctl_print().returncode == 0
     source = _source_dir()
     runtime_is_source = source.resolve() == RUNTIME_DIR.resolve()
     installed_plist = _installed_plist()
+    legacy_plist = _installed_plist(OLD_PLIST_PATH)
     expected_plist = _plist()
     installed_args = installed_plist.get("ProgramArguments") or []
     installed_env = installed_plist.get("EnvironmentVariables") or {}
     installed_program = str(installed_args[1]) if len(installed_args) >= 2 else ""
+    legacy_args = legacy_plist.get("ProgramArguments") or []
+    legacy_program = str(legacy_args[1]) if len(legacy_args) >= 2 else ""
     expected_program = str(RUNTIME_DIR / "proxy.py")
     repair_reasons = _repair_reasons(installed_plist, expected_plist)
-    needs_repair = bool(PLIST_PATH.exists() and repair_reasons)
+    expected_version = _proxy_version(_source_file(source, "proxy.py"))
+    running_program = installed_program if loaded else ""
+    if legacy_loaded:
+        running_program = legacy_program or str(OLD_RUNTIME_DIR / "proxy.py")
+    running_version = _proxy_version(Path(running_program)) if running_program else ""
+    version_mismatch = bool(expected_version and running_version and expected_version != running_version)
+    migration_required = bool(
+        legacy_loaded
+        or (not PLIST_PATH.exists() and OLD_PLIST_PATH.exists())
+        or version_mismatch
+        or (PLIST_PATH.exists() and repair_reasons)
+    )
+    needs_repair = bool((PLIST_PATH.exists() and repair_reasons) or migration_required)
     return {
         "supported": sys.platform == "darwin",
         "label": LABEL,
@@ -85,12 +101,18 @@ def status() -> dict:
         "legacy_installed": OLD_PLIST_PATH.exists(),
         "legacy_runtime_dir": str(OLD_RUNTIME_DIR),
         "loaded": loaded,
+        "legacy_loaded": legacy_loaded,
+        "legacy_running": legacy_loaded,
         "installed_program": installed_program,
         "installed_python": str(installed_args[0]) if installed_args else "",
         "installed_source_dir": str(installed_env.get(SOURCE_DIR_ENV, "")),
         "installed_app_bundle": str(installed_env.get(APP_BUNDLE_ENV, "")),
         "installed_pythonpath": str(installed_env.get("PYTHONPATH", "")),
         "expected_program": expected_program,
+        "expected_version": expected_version,
+        "running_version": running_version,
+        "version_mismatch": version_mismatch,
+        "migration_required": migration_required,
         "needs_repair": needs_repair,
         "repair_reasons": repair_reasons,
         "log_path": str(LOG_PATH),
@@ -116,10 +138,14 @@ def install(*, sync: bool = True, keep_backup: bool = False) -> dict:
     with open(PLIST_PATH, "wb") as f:
         plistlib.dump(_plist(), f)
 
+    # Fully retire the pre-rename service before (re)starting ours so the two
+    # KeepAlive agents stop fighting over port 8800. Safe regardless of whether
+    # we run inside the LaunchAgent: it targets a different label.
+    _remove_legacy_service()
+
     # When called from the Web UI running inside this LaunchAgent, bootout would
     # terminate the process before the HTTP response can reach the browser.
     if not _inside_launchagent():
-        _stop_legacy_launchagent()
         _run(["launchctl", "bootout", _domain(), str(PLIST_PATH)], check=False)
         _run(["launchctl", "bootstrap", _domain(), str(PLIST_PATH)])
 
@@ -159,7 +185,7 @@ def ensure_running() -> dict:
         else:
             _run(["launchctl", "bootstrap", _domain(), str(PLIST_PATH)], check=False)
         return status()
-    return install(sync=False)
+    return install(sync=bool(current.get("migration_required") or current.get("version_mismatch")))
 
 
 def _plist() -> dict:
@@ -487,17 +513,41 @@ def _migrate_legacy_runtime() -> None:
         return
 
 
-def _stop_legacy_launchagent() -> None:
-    if not OLD_PLIST_PATH.exists():
-        return
-    _run(["launchctl", "bootout", _domain(), str(OLD_PLIST_PATH)], check=False)
+def _remove_legacy_service() -> None:
+    """Fully retire the pre-rename LaunchAgent and its runtime.
+
+    The old teardown only ran ``launchctl bootout``, leaving the old plist on
+    disk and the old runtime intact. The 0.5.4 KeepAlive agent therefore kept
+    respawning (on login, or when the old Control.app was opened) and fought the
+    new agent for port 8800. Disable it, delete its plist, and move its runtime
+    aside so the old proxy.py can never spawn again.
+    """
+    # Preserve any accounts that only ever lived in the old runtime.
+    _sync_accounts_dir(OLD_RUNTIME_DIR / "accounts", RUNTIME_DIR / "accounts")
+    _run(["launchctl", "bootout", f"{_domain()}/{OLD_LABEL}"], check=False)
+    if OLD_PLIST_PATH.exists():
+        _run(["launchctl", "bootout", _domain(), str(OLD_PLIST_PATH)], check=False)
+    # Persistent override so a stray plist can never be bootstrapped again.
+    _run(["launchctl", "disable", f"{_domain()}/{OLD_LABEL}"], check=False)
+    if OLD_PLIST_PATH.exists():
+        try:
+            OLD_PLIST_PATH.unlink()
+        except OSError:
+            pass
+    if OLD_RUNTIME_DIR.exists():
+        retired = OLD_RUNTIME_DIR.parent / f".{OLD_RUNTIME_DIR.name}.legacy-removed-{int(time.time())}"
+        try:
+            shutil.move(str(OLD_RUNTIME_DIR), str(retired))
+        except OSError:
+            pass
 
 
-def _installed_plist() -> dict:
-    if not PLIST_PATH.exists():
+def _installed_plist(path: Optional[Path] = None) -> dict:
+    path = path or PLIST_PATH
+    if not path.exists():
         return {}
     try:
-        with open(PLIST_PATH, "rb") as f:
+        with open(path, "rb") as f:
             data = plistlib.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -573,10 +623,27 @@ def _launchctl_print() -> subprocess.CompletedProcess:
     return _run(["launchctl", "print", f"{_domain()}/{LABEL}"], check=False)
 
 
+def _legacy_launchctl_print() -> subprocess.CompletedProcess:
+    return _run(["launchctl", "print", f"{_domain()}/{OLD_LABEL}"], check=False)
+
+
 def _installed_program() -> str:
     args = _installed_plist().get("ProgramArguments") or []
     if len(args) >= 2:
         return str(args[1])
+    return ""
+
+
+def _proxy_version(proxy_file: Path) -> str:
+    try:
+        text = proxy_file.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("APP_VERSION"):
+            _, _, value = stripped.partition("=")
+            return value.strip().strip('"\'')
     return ""
 
 

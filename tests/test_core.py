@@ -486,6 +486,88 @@ class ControlActionsTests(unittest.TestCase):
         self.assertEqual(result["version"], "0.5.3")
         self.assertEqual(proxy_status.call_count, 2)
 
+    def test_repair_syncs_when_old_proxy_version_is_online(self):
+        old_service = {
+            "installed": False,
+            "loaded": False,
+            "needs_repair": True,
+            "version_mismatch": True,
+            "migration_required": True,
+            "legacy_running": True,
+            "expected_version": "0.6.0",
+            "running_version": "0.5.4",
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+        }
+        new_service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "version_mismatch": False,
+            "migration_required": False,
+            "legacy_running": False,
+            "expected_version": "0.6.0",
+            "running_version": "0.6.0",
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+            "restart_required": False,
+        }
+        with mock.patch("control_actions.proxy_status", return_value={"running": True, "version": "0.5.4"}), \
+                mock.patch("control_actions.service_manager.status", return_value=old_service), \
+                mock.patch("control_actions.service_manager.install", return_value=new_service) as install, \
+                mock.patch("control_actions.service_manager.restart", return_value=True), \
+                mock.patch("control_actions.wait_for_proxy", return_value={
+                    "running": True,
+                    "version": "0.6.0",
+                    "active_accounts": 1,
+                    "total_accounts": 1,
+                }), \
+                mock.patch("control_actions.codex_config.ensure_enabled", return_value={
+                    "enabled": True,
+                    "mode": "codex_pool_provider",
+                }), \
+                mock.patch("control_actions.codex_dependency_status", return_value={}), \
+                mock.patch("control_actions.runtime_status", return_value={}):
+            result = control_actions.repair()
+
+        self.assertEqual(result["action"], "started_or_repaired")
+        self.assertEqual(result["previous_version"], "0.5.4")
+        self.assertEqual(result["expected_version"], "0.6.0")
+        self.assertTrue(result["updated"])
+        install.assert_called_once_with(sync=True)
+
+    def test_repair_returns_already_running_only_when_service_matches_app(self):
+        service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "version_mismatch": False,
+            "migration_required": False,
+            "legacy_running": False,
+            "expected_version": "0.6.0",
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+        }
+        with mock.patch("control_actions.proxy_status", return_value={
+            "running": True,
+            "version": "0.6.0",
+            "active_accounts": 2,
+            "total_accounts": 2,
+        }), mock.patch("control_actions.service_manager.status", return_value=service), \
+                mock.patch("control_actions.service_manager.install") as install, \
+                mock.patch("control_actions.codex_config.ensure_enabled", return_value={
+                    "enabled": True,
+                    "mode": "codex_pool_provider",
+                }), \
+                mock.patch("control_actions.codex_dependency_status", return_value={}), \
+                mock.patch("control_actions.runtime_status", return_value={}):
+            result = control_actions.repair()
+
+        self.assertEqual(result["action"], "already_running")
+        self.assertFalse(result["updated"])
+        self.assertEqual(result["version"], "0.6.0")
+        install.assert_not_called()
+
     def test_apply_update_returns_busy_when_lock_exists(self):
         with mock.patch("control_actions._acquire_update_lock", return_value=None):
             result = control_actions.apply_update()
@@ -2096,8 +2178,10 @@ class ServiceManagerTests(unittest.TestCase):
         }))
 
         with mock.patch.object(service_manager, "PLIST_PATH", plist_path), \
+                mock.patch.object(service_manager, "OLD_PLIST_PATH", plist_path.parent / "missing-old.plist"), \
                 mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
                 mock.patch.object(service_manager, "_launchctl_print", return_value=mock.Mock(returncode=0)), \
+                mock.patch.object(service_manager, "_legacy_launchctl_print", return_value=mock.Mock(returncode=3)), \
                 mock.patch.dict(os.environ, {
                     service_manager.SOURCE_DIR_ENV: str(source),
                     service_manager.APP_BUNDLE_ENV: str(app),
@@ -2110,6 +2194,37 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertEqual(result["installed_source_dir"], str(source / "old-runtime"))
         self.assertEqual(result["installed_app_bundle"], str(old_app))
 
+    def test_status_marks_loaded_legacy_launchagent_as_migration_required(self):
+        source = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        old_runtime = Path(tempfile.mkdtemp())
+        plist_dir = Path(tempfile.mkdtemp())
+        plist_path = plist_dir / "com.fank1ng.xiaolachang.plist"
+        old_plist_path = plist_dir / "com.fank1ng.codexproxyapi.plist"
+        (source / "proxy.py").write_text('APP_VERSION = "0.6.0"\n')
+        (old_runtime / "proxy.py").write_text('APP_VERSION = "0.5.4"\n')
+        old_plist_path.write_bytes(plistlib.dumps({
+            "Label": service_manager.OLD_LABEL,
+            "ProgramArguments": [sys.executable, str(old_runtime / "proxy.py")],
+            "WorkingDirectory": str(old_runtime),
+        }))
+
+        with mock.patch.object(service_manager, "PLIST_PATH", plist_path), \
+                mock.patch.object(service_manager, "OLD_PLIST_PATH", old_plist_path), \
+                mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime), \
+                mock.patch.object(service_manager, "_launchctl_print", return_value=mock.Mock(returncode=3)), \
+                mock.patch.object(service_manager, "_legacy_launchctl_print", return_value=mock.Mock(returncode=0)), \
+                mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}):
+            result = service_manager.status()
+
+        self.assertTrue(result["legacy_loaded"])
+        self.assertTrue(result["legacy_running"])
+        self.assertTrue(result["migration_required"])
+        self.assertTrue(result["version_mismatch"])
+        self.assertEqual(result["expected_version"], "0.6.0")
+        self.assertEqual(result["running_version"], "0.5.4")
+
     def test_ensure_running_repairs_installed_launchagent_with_stale_environment(self):
         with mock.patch.object(service_manager, "status", return_value={
             "installed": True,
@@ -2120,6 +2235,18 @@ class ServiceManagerTests(unittest.TestCase):
 
         self.assertEqual(result, {"installed": True})
         install.assert_called_once_with(sync=False)
+
+    def test_ensure_running_syncs_when_migration_is_required(self):
+        with mock.patch.object(service_manager, "status", return_value={
+            "installed": False,
+            "loaded": False,
+            "needs_repair": True,
+            "migration_required": True,
+        }), mock.patch.object(service_manager, "install", return_value={"installed": True}) as install:
+            result = service_manager.ensure_running()
+
+        self.assertEqual(result, {"installed": True})
+        install.assert_called_once_with(sync=True)
 
     def test_sync_runtime_dir_uses_configured_source(self):
         source = Path(tempfile.mkdtemp())
@@ -2147,6 +2274,22 @@ class ServiceManagerTests(unittest.TestCase):
             service_manager._sync_runtime_dir()
 
         self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
+
+    def test_legacy_runtime_migration_copies_credentials_and_keeps_old_dir(self):
+        runtime = Path(tempfile.mkdtemp()) / "xiaolachang"
+        old_runtime = Path(tempfile.mkdtemp()) / "codexproxyapi"
+        account_dir = old_runtime / "accounts" / "main"
+        account_dir.mkdir(parents=True)
+        (account_dir / "auth.json").write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+        (old_runtime / "proxy.py").write_text('APP_VERSION = "0.5.4"\n')
+
+        with mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime):
+            service_manager._migrate_legacy_runtime()
+
+        self.assertTrue((runtime / "accounts" / "main" / "auth.json").exists())
+        self.assertTrue((old_runtime / "accounts" / "main" / "auth.json").exists())
+        self.assertTrue(old_runtime.exists())
 
     def test_app_bundle_dir_uses_environment(self):
         app = Path(tempfile.mkdtemp()) / "Codex Proxy Control.app"

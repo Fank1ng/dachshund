@@ -34,6 +34,9 @@ KEY_LABELS = {
     "installed": "后台服务已安装",
     "loaded": "后台服务已加载",
     "needs_repair": "需要修复",
+    "version_mismatch": "版本不一致",
+    "migration_required": "需要迁移",
+    "legacy_running": "旧后台正在运行",
     "enabled": "已启用",
     "mode": "模式",
     "running": "代理在线",
@@ -206,6 +209,9 @@ def compact(data: dict) -> str:
         "installed",
         "loaded",
         "needs_repair",
+        "version_mismatch",
+        "migration_required",
+        "legacy_running",
         "enabled",
         "mode",
         "running",
@@ -291,37 +297,98 @@ def with_product_status(data: dict) -> dict:
     return result
 
 
+def _service_matches_current_app(service: dict, proxy: Optional[dict], expected_version: str) -> bool:
+    if not proxy:
+        return False
+    if service.get("needs_repair") or service.get("version_mismatch"):
+        return False
+    if service.get("migration_required") or service.get("legacy_running") or service.get("legacy_loaded"):
+        return False
+    if not service.get("installed") or not service.get("loaded"):
+        return False
+    if expected_version and proxy.get("version") != expected_version:
+        return False
+    return True
+
+
 def repair() -> dict:
     proxy_before = proxy_status(timeout=2)
     service = service_manager.status()
     codex = codex_config.ensure_enabled(True)
-    if proxy_before:
+    expected_version = service.get("expected_version") or source_app_version(service.get("source_dir"))
+    previous_version = proxy_before.get("version") if proxy_before else service.get("running_version")
+    if _service_matches_current_app(service, proxy_before, expected_version):
         return with_product_status({
             "action": "already_running",
             "installed": service.get("installed"),
             "loaded": service.get("loaded"),
             "needs_repair": service.get("needs_repair"),
+            "version_mismatch": service.get("version_mismatch"),
+            "migration_required": service.get("migration_required"),
+            "legacy_running": service.get("legacy_running"),
             "enabled": codex.get("enabled"),
             "mode": codex.get("mode"),
             "running": True,
             "active_accounts": proxy_before.get("active_accounts"),
             "total_accounts": proxy_before.get("total_accounts"),
+            "version": proxy_before.get("version"),
+            "previous_version": previous_version,
+            "expected_version": expected_version,
+            "updated": False,
+            "restart_started": False,
             "source_dir": service.get("source_dir"),
             "runtime_dir": service.get("runtime_dir"),
             "restart_required": False,
         })
-    service = service_manager.ensure_running()
-    proxy = wait_for_proxy()
+    try:
+        service = service_manager.install(sync=True)
+    except service_manager.RuntimeSyncError as e:
+        return with_product_status({
+            "action": "started_or_repaired",
+            "installed": service.get("installed"),
+            "loaded": service.get("loaded"),
+            "needs_repair": service.get("needs_repair"),
+            "version_mismatch": service.get("version_mismatch"),
+            "migration_required": service.get("migration_required"),
+            "legacy_running": service.get("legacy_running"),
+            "enabled": codex.get("enabled"),
+            "mode": codex.get("mode"),
+            "running": bool(proxy_before),
+            "version": previous_version,
+            "previous_version": previous_version,
+            "expected_version": expected_version,
+            "updated": False,
+            "restart_started": False,
+            "source_dir": service.get("source_dir"),
+            "runtime_dir": service.get("runtime_dir"),
+            "restart_required": False,
+            "backup_path": str(e.backup_path) if e.backup_path else None,
+            "error": str(e),
+            "restore_error": e.restore_error,
+        })
+    restart_started = False
+    if not service.get("restart_required"):
+        restart_started = service_manager.restart()
+    proxy = wait_for_proxy(expected_version=expected_version or None)
+    updated = bool(proxy and expected_version and previous_version != expected_version and proxy.get("version") == expected_version)
     return with_product_status({
         "action": "started_or_repaired",
         "installed": service.get("installed"),
         "loaded": service.get("loaded"),
         "needs_repair": service.get("needs_repair"),
+        "version_mismatch": service.get("version_mismatch"),
+        "migration_required": service.get("migration_required"),
+        "legacy_running": service.get("legacy_running"),
         "enabled": codex.get("enabled"),
         "mode": codex.get("mode"),
         "running": bool(proxy),
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "version": proxy.get("version") if proxy else None,
+        "previous_version": previous_version,
+        "expected_version": expected_version,
+        "updated": updated,
+        "restart_started": restart_started,
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
         "restart_required": service.get("restart_required"),
