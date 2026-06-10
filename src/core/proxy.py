@@ -31,6 +31,7 @@ from login_manager import LoginManager, find_codex_cli
 from proxy_core import handle as proxy_handle
 from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
+from usage_stats import summary as usage_summary
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
@@ -371,6 +372,11 @@ async def api_quota_refresh(request: web.Request) -> web.Response:
     })
 
 
+async def api_token_usage(request: web.Request) -> web.Response:
+    """GET /api/token-usage — return captured exact token usage aggregates."""
+    return web.json_response(usage_summary())
+
+
 async def api_status(request: web.Request) -> web.Response:
     """GET /api/status — proxy health and stats."""
     disabled_accounts = sum(1 for acct in pool.accounts if not acct.enabled)
@@ -460,6 +466,7 @@ async def api_version(request: web.Request) -> web.Response:
             "trash_restore": True,
             "quota_weights": True,
             "quota_path_diagnostics": True,
+            "token_usage": True,
         },
     })
 
@@ -508,7 +515,7 @@ async def api_control_app_required(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "error": "This action moved to the native Control App so the proxy can stay running.",
-            "use": "Codex Proxy Control.app or control_panel.command",
+            "use": "小腊肠.app or control_panel.command",
         },
         status=410,
     )
@@ -613,6 +620,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/accounts/{name}/login/stop", api_control_app_required)
     app.router.add_get("/api/quota", api_quota)
     app.router.add_post("/api/quota/refresh", api_quota_refresh)
+    app.router.add_get("/api/token-usage", api_token_usage)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/version", api_version)

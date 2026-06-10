@@ -15,6 +15,13 @@ from aiohttp import web
 
 from account_manager import AccountPool
 from config import get
+from usage_stats import (
+    UsageCollector,
+    extract_usage_from_bytes,
+    extract_usage_from_sse_bytes,
+    extract_usage_from_ws_payload,
+    record_request_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,7 @@ class _WebSocketRelayResult:
     close_code: Optional[int] = None
     error: str = ""
     replay_frames: Optional[list[tuple[str, Union[bytes, str]]]] = None
+    usage: Optional[dict] = None
 
 
 UPSTREAM_MAP = {
@@ -390,6 +398,17 @@ def _should_stream_response(path: str, upstream_resp: aiohttp.ClientResponse) ->
     return _is_streaming_response(upstream_resp)
 
 
+def _record_token_usage(path: str, request_id: str, account, usage: Optional[dict]) -> None:
+    if not _is_codex_responses_path(path):
+        return
+    record_request_usage(
+        request_id=request_id,
+        account=getattr(account, "name", ""),
+        path=path,
+        usage=usage,
+    )
+
+
 def _response_headers(upstream_resp: aiohttp.ClientResponse, request_id: str) -> dict:
     headers = {
         k: v for k, v in upstream_resp.headers.items()
@@ -658,6 +677,7 @@ async def _relay_realtime_stream(
     bytes_forwarded = 0
     first_byte_ms = None
     response_prepared = False
+    usage_collector = UsageCollector() if _is_codex_responses_path(path) else None
 
     async def prepare_response() -> None:
         nonlocal response_prepared
@@ -698,6 +718,8 @@ async def _relay_realtime_stream(
             first_byte_ms=first_byte_ms,
             stream_keepalive_count=keepalive_count,
         )
+        if usage_collector:
+            _record_token_usage(path, request_id, account, usage_collector.finish())
         if completed:
             pool.bind_session(session_key, account)
 
@@ -711,6 +733,8 @@ async def _relay_realtime_stream(
 
         if tracker:
             tracker.feed(first_chunk)
+        if usage_collector:
+            usage_collector.feed_bytes(first_chunk)
         if tracker and not first_chunk and not tracker.completed:
             raise _RetryableStreamError("stream closed before response.completed")
 
@@ -758,6 +782,8 @@ async def _relay_realtime_stream(
 
             if tracker:
                 tracker.feed(chunk)
+            if usage_collector:
+                usage_collector.feed_bytes(chunk)
             if not chunk:
                 continue
             try:
@@ -1088,6 +1114,7 @@ async def _relay_websocket_pair(
             close_code=metrics["close_code"],
             error=str(metrics["error"]),
             replay_frames=sent_to_upstream,
+            usage=None,
         )
 
     async def upstream_to_client() -> None:
@@ -1096,6 +1123,12 @@ async def _relay_websocket_pair(
                 metrics["messages"] += 1
                 metrics["bytes_forwarded"] += _ws_message_bytes(msg)
                 _feed_ws_completion(tracker, msg)
+                usage = extract_usage_from_ws_payload(msg.data)
+                if usage and (
+                    not metrics.get("usage")
+                    or usage["total_tokens"] >= metrics["usage"]["total_tokens"]
+                ):
+                    metrics["usage"] = usage
                 metrics["completed"] = tracker.completed
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await client_ws.send_str(msg.data)
@@ -1148,6 +1181,7 @@ async def _relay_websocket_pair(
         close_code=metrics["close_code"],
         error=str(metrics["error"]),
         replay_frames=sent_to_upstream,
+        usage=metrics.get("usage"),
     )
 
 
@@ -1223,6 +1257,7 @@ async def _handle_codex_websocket(
             session_key=_public_session_key(session_key),
             affinity_hit=_public_affinity_hit(session_key, connected.affinity_hit),
         )
+        _record_token_usage(path, request_id, account, result.usage)
         if result.completed:
             _clear_ws_stream_interruption_cooldown(pool, account)
             await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
@@ -1466,6 +1501,13 @@ async def _handle_with_session(
                                     session_key=_public_session_key(session_key),
                                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
                                 )
+                                if 200 <= upstream_resp.status < 300:
+                                    _record_token_usage(
+                                        path,
+                                        request_id,
+                                        account,
+                                        extract_usage_from_bytes(payload),
+                                    )
                                 return web.Response(
                                     status=upstream_resp.status,
                                     body=payload,
@@ -1520,6 +1562,11 @@ async def _handle_with_session(
                                     session_key=_public_session_key(session_key),
                                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
                                 )
+                                usage = (
+                                    extract_usage_from_sse_bytes(buffered.body)
+                                    or extract_usage_from_bytes(buffered.body)
+                                )
+                                _record_token_usage(path, request_id, account, usage)
                                 pool.bind_session(session_key, account)
                                 return web.Response(
                                     status=upstream_resp.status,

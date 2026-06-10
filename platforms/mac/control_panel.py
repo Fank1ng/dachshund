@@ -103,7 +103,7 @@ def load_local_account(name: str) -> Account:
 class ControlPanel:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Codex Proxy Control")
+        self.root.title("小腊肠")
         self.root.geometry("980x680")
         self.root.minsize(860, 560)
         self.accounts: list[dict] = []

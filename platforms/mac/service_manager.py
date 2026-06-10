@@ -9,12 +9,15 @@ from pathlib import Path
 
 from config import CONFIG_DIR
 
-LABEL = "com.fank1ng.codexproxyapi"
+LABEL = "com.fank1ng.xiaolachang"
+OLD_LABEL = "com.fank1ng.codexproxyapi"
 SOURCE_DIR_ENV = "CODEX_PROXY_SOURCE_DIR"
 APP_BUNDLE_ENV = "CODEX_PROXY_APP_BUNDLE"
 PYTHON_ENV = "CODEX_PROXY_PYTHON"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "codexproxyapi"
+OLD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{OLD_LABEL}.plist"
+RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "xiaolachang"
+OLD_RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "codexproxyapi"
 LOG_PATH = RUNTIME_DIR / "proxy.log"
 COPY_FILES = {
     ".gitignore",
@@ -30,6 +33,7 @@ COPY_FILES = {
     "quota_tracker.py",
     "requirements.txt",
     "service_manager.py",
+    "usage_stats.py",
 }
 COPY_DIRS = {"static", "vendor", "python"}
 ACCOUNT_FILES = {"auth.json", "account.json", "quota.json"}
@@ -59,6 +63,8 @@ def status() -> dict:
         "python": str(_python_executable()),
         "pythonpath": str(_pythonpath()),
         "installed": PLIST_PATH.exists(),
+        "legacy_installed": OLD_PLIST_PATH.exists(),
+        "legacy_runtime_dir": str(OLD_RUNTIME_DIR),
         "loaded": loaded,
         "installed_program": installed_program,
         "installed_python": str(installed_args[0]) if installed_args else "",
@@ -75,6 +81,7 @@ def status() -> dict:
 def install(*, sync: bool = True) -> dict:
     if sys.platform != "darwin":
         raise RuntimeError("LaunchAgent is only supported on macOS")
+    _migrate_legacy_runtime()
     if sync or not (RUNTIME_DIR / "proxy.py").exists():
         _sync_runtime_dir()
     codex_proxy = None
@@ -92,6 +99,7 @@ def install(*, sync: bool = True) -> dict:
     # When called from the Web UI running inside this LaunchAgent, bootout would
     # terminate the process before the HTTP response can reach the browser.
     if not _inside_launchagent():
+        _stop_legacy_launchagent()
         _run(["launchctl", "bootout", _domain(), str(PLIST_PATH)], check=False)
         _run(["launchctl", "bootstrap", _domain(), str(PLIST_PATH)])
 
@@ -122,6 +130,7 @@ def ensure_running() -> dict:
     """Start or repair the LaunchAgent without syncing source files."""
     if sys.platform != "darwin":
         raise RuntimeError("LaunchAgent is only supported on macOS")
+    _migrate_legacy_runtime()
     current = status()
     if current.get("installed") and not current.get("needs_repair"):
         if current.get("loaded"):
@@ -154,6 +163,7 @@ def _plist() -> dict:
 
 
 def _sync_runtime_dir() -> None:
+    _migrate_legacy_runtime()
     source = _source_dir().resolve()
     target = RUNTIME_DIR.resolve()
     if source == target:
@@ -235,7 +245,7 @@ def _app_bundle_dir() -> Path:
     for parent in (source, *source.parents):
         if parent.suffix == ".app" and (parent / "Contents").exists():
             return parent
-    return CONFIG_DIR / "Codex Proxy Control.app"
+    return CONFIG_DIR / "小腊肠.app"
 
 
 def _python_executable() -> Path:
@@ -292,7 +302,23 @@ def _pythonpath():
 
 
 def _inside_launchagent() -> bool:
-    return os.environ.get("XPC_SERVICE_NAME") == LABEL
+    return os.environ.get("XPC_SERVICE_NAME") in {LABEL, OLD_LABEL}
+
+
+def _migrate_legacy_runtime() -> None:
+    if not OLD_RUNTIME_DIR.exists() or RUNTIME_DIR.exists():
+        return
+    try:
+        RUNTIME_DIR.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(OLD_RUNTIME_DIR, RUNTIME_DIR, symlinks=True)
+    except Exception:
+        return
+
+
+def _stop_legacy_launchagent() -> None:
+    if not OLD_PLIST_PATH.exists():
+        return
+    _run(["launchctl", "bootout", _domain(), str(OLD_PLIST_PATH)], check=False)
 
 
 def _installed_plist() -> dict:

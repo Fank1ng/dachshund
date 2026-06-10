@@ -3,11 +3,11 @@ set -euo pipefail
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-APP_NAME="Codex Proxy Control.app"
+APP_NAME="小腊肠.app"
 APP="$ROOT/$APP_NAME"
 BUILD_DIR="$ROOT/build"
 STAGE_LINK="$BUILD_DIR/dmg-stage"
-STAGE="${TMPDIR:-/private/tmp}/codexproxyapi-dmg-stage"
+STAGE="${TMPDIR:-/private/tmp}/xiaolachang-dmg-stage"
 DIST="$ROOT/dist"
 
 clear_bundle_xattrs() {
@@ -48,7 +48,7 @@ sign_runtime_components() {
 "$MAC_DIR/build_control_app.command"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-DMG_NAME="Codex-Proxy-Control-${VERSION}-mac.dmg"
+DMG_NAME="XiaoLaChang-${VERSION}-mac.dmg"
 DMG_TMP="$BUILD_DIR/${DMG_NAME%.dmg}.tmp.dmg"
 DMG="$DIST/$DMG_NAME"
 
@@ -76,12 +76,12 @@ ditto --norsrc "$APP" "$STAGE/$APP_NAME"
 ln -s /Applications "$STAGE/Applications"
 
 cat > "$STAGE/首次打开说明.txt" <<'TXT'
-Codex Proxy Control 首次打开说明
+小腊肠首次打开说明
 
-1. 把 Codex Proxy Control.app 拖到 Applications。
+1. 把小腊肠.app拖到 Applications。
 2. 如果 macOS 提示“无法验证开发者”，请右键点击 App，选择“打开”，再在弹窗中确认。
-3. 如果仍被拦截，进入“系统设置” -> “隐私与安全性”，允许打开 Codex Proxy Control。
-4. 打开 App 后点击“启动/修复”，然后按界面提示添加账号并启用代理。
+3. 如果仍被拦截，进入“系统设置” -> “隐私与安全性”，允许打开小腊肠。
+4. 打开 App 后点击“启动”，然后按界面提示添加账号并启用代理。
 
 本版本采用本地/ad-hoc 签名，没有 Apple 公证，因此首次打开可能需要手动放行。
 TXT
@@ -100,7 +100,7 @@ fi
 
 rm -f "$DMG_TMP" "$DMG"
 hdiutil create \
-  -volname "Codex Proxy Control $VERSION" \
+  -volname "小腊肠 $VERSION" \
   -srcfolder "$STAGE" \
   -fs HFS+ \
   -format UDZO \

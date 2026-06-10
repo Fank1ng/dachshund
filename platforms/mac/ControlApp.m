@@ -85,6 +85,7 @@ static NSString *CPRelativeTime(id epochValue) {
 @property(nonatomic, strong) NSArray<NSDictionary *> *accounts;
 @property(nonatomic, strong) NSDictionary *statusSnapshot;
 @property(nonatomic, strong) NSDictionary *quotaSnapshot;
+@property(nonatomic, strong) NSDictionary *tokenUsageSnapshot;
 @property(nonatomic, copy) NSString *activeSection;
 @property(nonatomic, copy) NSString *selectedAccountName;
 @property(nonatomic, copy) NSString *appBundlePath;
@@ -95,6 +96,7 @@ static NSString *CPRelativeTime(id epochValue) {
 @property(nonatomic, strong) NSTimer *refreshTimer;
 @property(nonatomic, assign) BOOL busy;
 @property(nonatomic, assign) BOOL compactInspector;
+@property(nonatomic, assign) NSInteger tokenUsageMode;
 @end
 
 @interface CPFlippedStackView : NSStackView
@@ -104,6 +106,19 @@ static NSString *CPRelativeTime(id epochValue) {
 @property(nonatomic, strong) NSColor *cpBackgroundColor;
 @property(nonatomic, strong) NSColor *cpBorderColor;
 @property(nonatomic, strong) NSColor *cpShadowColor;
+@end
+
+@interface CPQuotaRingView : NSView
+@property(nonatomic, assign) double progress;
+@property(nonatomic, copy) NSString *centerText;
+@end
+
+@interface CPBarChartView : NSView
+@property(nonatomic, strong) NSArray<NSDictionary *> *rows;
+@end
+
+@interface CPHeatmapView : NSView
+@property(nonatomic, strong) NSArray<NSDictionary *> *rows;
 @end
 
 @implementation CPFlippedStackView
@@ -158,6 +173,116 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 @end
 
+@implementation CPQuotaRingView
+- (BOOL)isFlipped { return YES; }
+- (void)setProgress:(double)progress {
+    _progress = MAX(0, MIN(1, progress));
+    self.needsDisplay = YES;
+}
+- (void)setCenterText:(NSString *)centerText {
+    _centerText = [centerText copy];
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height) - 14;
+    NSRect rect = NSMakeRect((self.bounds.size.width - side) / 2, (self.bounds.size.height - side) / 2, side, side);
+    NSBezierPath *track = [NSBezierPath bezierPathWithOvalInRect:rect];
+    track.lineWidth = 9;
+    [[NSColor.separatorColor colorWithAlphaComponent:0.45] setStroke];
+    [track stroke];
+
+    NSBezierPath *arc = [NSBezierPath bezierPath];
+    CGFloat radius = side / 2;
+    NSPoint center = NSMakePoint(NSMidX(rect), NSMidY(rect));
+    [arc appendBezierPathWithArcWithCenter:center radius:radius startAngle:-90 endAngle:-90 + (360 * self.progress) clockwise:NO];
+    arc.lineWidth = 9;
+    arc.lineCapStyle = NSLineCapStyleRound;
+    [NSColor.controlAccentColor setStroke];
+    [arc stroke];
+
+    NSString *text = self.centerText.length ? self.centerText : @"-";
+    NSDictionary *attrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:17 weight:NSFontWeightBold],
+        NSForegroundColorAttributeName: NSColor.labelColor,
+    };
+    NSSize size = [text sizeWithAttributes:attrs];
+    [text drawAtPoint:NSMakePoint(center.x - size.width / 2, center.y - size.height / 2) withAttributes:attrs];
+}
+@end
+
+@implementation CPBarChartView
+- (BOOL)isFlipped { return YES; }
+- (void)setRows:(NSArray<NSDictionary *> *)rows {
+    _rows = rows;
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    NSArray *rows = self.rows ?: @[];
+    if (!rows.count) {
+        return;
+    }
+    double maxValue = 1;
+    for (NSDictionary *row in rows) {
+        maxValue = MAX(maxValue, CPDouble(row[@"total_tokens"]));
+    }
+    CGFloat inset = 10;
+    CGFloat chartHeight = self.bounds.size.height - 24;
+    CGFloat availableWidth = self.bounds.size.width - (inset * 2);
+    CGFloat gap = 3;
+    CGFloat barWidth = MAX(3, (availableWidth - gap * (rows.count - 1)) / rows.count);
+    for (NSInteger i = 0; i < rows.count; i++) {
+        NSDictionary *row = rows[i];
+        double value = CPDouble(row[@"total_tokens"]);
+        CGFloat height = MAX(2, chartHeight * value / maxValue);
+        CGFloat x = inset + i * (barWidth + gap);
+        NSRect barRect = NSMakeRect(x, inset + chartHeight - height, barWidth, height);
+        NSBezierPath *bar = [NSBezierPath bezierPathWithRoundedRect:barRect xRadius:2 yRadius:2];
+        [[NSColor.controlAccentColor colorWithAlphaComponent:value > 0 ? 0.82 : 0.16] setFill];
+        [bar fill];
+    }
+}
+@end
+
+@implementation CPHeatmapView
+- (BOOL)isFlipped { return YES; }
+- (void)setRows:(NSArray<NSDictionary *> *)rows {
+    _rows = rows;
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    NSArray *rows = self.rows ?: @[];
+    if (!rows.count) {
+        return;
+    }
+    double maxValue = 1;
+    for (NSDictionary *row in rows) {
+        maxValue = MAX(maxValue, CPDouble(row[@"total_tokens"]));
+    }
+    CGFloat cell = 9;
+    CGFloat gap = 4;
+    NSInteger columns = MAX(1, floor((self.bounds.size.width - 10) / (cell + gap)));
+    for (NSInteger i = 0; i < rows.count; i++) {
+        NSDictionary *row = rows[i];
+        NSInteger col = i % columns;
+        NSInteger line = i / columns;
+        CGFloat x = 5 + col * (cell + gap);
+        CGFloat y = 6 + line * (cell + gap);
+        if (y + cell > self.bounds.size.height) {
+            break;
+        }
+        double ratio = maxValue <= 0 ? 0 : CPDouble(row[@"total_tokens"]) / maxValue;
+        NSColor *color = ratio <= 0
+            ? [NSColor.separatorColor colorWithAlphaComponent:0.35]
+            : [NSColor.controlAccentColor colorWithAlphaComponent:0.25 + 0.65 * ratio];
+        [color setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x, y, cell, cell) xRadius:2 yRadius:2] fill];
+    }
+}
+@end
+
 @implementation ControlWindowController
 
 - (instancetype)init {
@@ -168,7 +293,7 @@ static NSString *CPRelativeTime(id epochValue) {
     NSBundle *bundle = NSBundle.mainBundle;
     _appBundlePath = bundle.bundlePath;
     _resourceRuntimeDir = [bundle.resourceURL URLByAppendingPathComponent:@"runtime"].path;
-    _runtimeDir = [@"~/Library/Application Support/codexproxyapi" stringByExpandingTildeInPath];
+    _runtimeDir = [@"~/Library/Application Support/xiaolachang" stringByExpandingTildeInPath];
     _resultPath = [_runtimeDir stringByAppendingPathComponent:@"control-result.txt"];
     _logPath = [_runtimeDir stringByAppendingPathComponent:@"control-app.log"];
     _buttons = [NSMutableArray array];
@@ -176,7 +301,9 @@ static NSString *CPRelativeTime(id epochValue) {
     _accounts = @[];
     _statusSnapshot = @{};
     _quotaSnapshot = @{};
-    _activeSection = @"dashboard";
+    _tokenUsageSnapshot = @{};
+    _activeSection = @"overview";
+    _tokenUsageMode = 0;
     return self;
 }
 
@@ -188,7 +315,7 @@ static NSString *CPRelativeTime(id epochValue) {
                                                         NSWindowStyleMaskMiniaturizable)
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
-    self.window.title = @"Codex 代理控制台";
+    self.window.title = @"小腊肠";
     self.window.contentMinSize = NSMakeSize(600, 460);
     self.window.contentMaxSize = NSMakeSize(600, 460);
     self.window.minSize = self.window.frame.size;
@@ -204,9 +331,10 @@ static NSString *CPRelativeTime(id epochValue) {
     root.cpBackgroundColor = NSColor.windowBackgroundColor;
     self.window.contentView = root;
 
-    CPThemedView *sidebar = [[CPThemedView alloc] init];
-    sidebar.wantsLayer = YES;
-    sidebar.cpBackgroundColor = NSColor.controlBackgroundColor;
+    NSVisualEffectView *sidebar = [[NSVisualEffectView alloc] init];
+    sidebar.material = NSVisualEffectMaterialSidebar;
+    sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    sidebar.state = NSVisualEffectStateActive;
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:sidebar];
     [self buildSidebarInView:sidebar];
@@ -283,11 +411,11 @@ static NSString *CPRelativeTime(id epochValue) {
     [sidebar addSubview:self.sidebarStack];
     [self pinView:self.sidebarStack toView:sidebar insets:NSEdgeInsetsMake(16, 8, 12, 8)];
 
-    [self.sidebarStack addArrangedSubview:[self sidebarBrandIconView]];
-    [self addSpacerToStack:self.sidebarStack height:10];
+    [self addSpacerToStack:self.sidebarStack height:4];
 
     NSArray<NSDictionary *> *items = @[
-        @{@"id": @"dashboard", @"title": @"总览", @"symbol": @"gauge"},
+        @{@"id": @"overview", @"title": @"总览", @"symbol": @"chart.pie"},
+        @{@"id": @"accounts", @"title": @"账号", @"symbol": @"person.2"},
         @{@"id": @"config", @"title": @"配置", @"symbol": @"slider.horizontal.3"},
         @{@"id": @"logs", @"title": @"日志", @"symbol": @"terminal"},
     ];
@@ -351,7 +479,8 @@ static NSString *CPRelativeTime(id epochValue) {
     self.toolbarStack.alignment = NSLayoutAttributeCenterY;
     self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
-    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
+    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
+    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"额度" symbol:@"chart.bar" selector:@selector(refreshQuotaAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Web" symbol:@"safari" selector:@selector(openWebAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
     [header addSubview:self.toolbarStack];
@@ -363,8 +492,7 @@ static NSString *CPRelativeTime(id epochValue) {
         [self.toolbarStack.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
     ]];
     [rootStack addArrangedSubview:header];
-
-    [self addDividerToStack:rootStack top:8 bottom:8];
+    [self addSpacerToStack:rootStack height:8];
 
     NSScrollView *scroll = [[NSScrollView alloc] init];
     scroll.drawsBackground = NO;
@@ -399,15 +527,24 @@ static NSString *CPRelativeTime(id epochValue) {
     self.accountTable = nil;
     self.inspectorStack = nil;
 
-    if ([self.activeSection isEqualToString:@"config"]) {
+    if ([self.activeSection isEqualToString:@"accounts"]) {
+        [self renderAccountsSection];
+    } else if ([self.activeSection isEqualToString:@"config"]) {
         [self renderConfigSection];
     } else if ([self.activeSection isEqualToString:@"logs"]) {
         [self renderLogsSection];
     } else {
-        [self renderDashboardSection];
+        [self renderOverviewSection];
     }
     [self reloadAccountTableSelection];
     [self updateHeaderText];
+}
+
+- (void)renderOverviewSection {
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self totalQuotaCard] width:450]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenStatsCard] width:450]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenBarChartCard] width:450]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenHeatmapCard] width:450]];
 }
 
 - (void)renderDashboardSection {
@@ -420,8 +557,13 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)renderAccountsSection {
-    [self.contentStack addArrangedSubview:[self accountAndInspectorRowWithCompact:NO]];
-    [self.contentStack addArrangedSubview:[self accountQuickActionsCard]];
+    if ([self shouldShowSetupCard]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self setupChecklistCard]]];
+    }
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self metricsRow]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountsTableCardWithHeight:176]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:110 compact:YES]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountQuickActionsCard]]];
 }
 
 - (void)renderQuotaSection {
@@ -494,7 +636,7 @@ static NSString *CPRelativeTime(id epochValue) {
     NSString *cliDetail = cliReady
         ? CPDisplayString(self.statusSnapshot[@"codex_cli"])
         : CPDisplayString(self.statusSnapshot[@"codex_cli_error"]);
-    NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动/修复”安装并启动";
+    NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动”安装并启动";
     NSString *proxyDetail = proxyReady ? @"Codex 已配置为代理模式" : @"点击“启用代理”写入 Codex 配置";
 
     [stack addArrangedSubview:[self setupStatusLineWithTitle:@"运行资源" detail:runtimeReady ? @"运行目录已准备" : @"正在准备或缺少 App 内置资源" ok:runtimeReady]];
@@ -540,6 +682,181 @@ static NSString *CPRelativeTime(id epochValue) {
     [row addArrangedSubview:[self metricCardWithTitle:@"可用账号" value:accounts detail:@"active / total" color:NSColor.systemBlueColor]];
     [row addArrangedSubview:[self metricCardWithTitle:@"选择策略" value:strategy detail:@"配置热更新" color:NSColor.systemPurpleColor]];
     return row;
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageRows {
+    NSString *key = self.tokenUsageMode == 1 ? @"weekly" : @"daily";
+    return CPArray(self.tokenUsageSnapshot[key]);
+}
+
+- (NSDictionary *)tokenUsageTotal {
+    return CPDict(self.tokenUsageSnapshot[@"total"]);
+}
+
+- (NSString *)formatTokenCount:(double)value {
+    if (value >= 1000000) {
+        return [NSString stringWithFormat:@"%.1fM", value / 1000000.0];
+    }
+    if (value >= 1000) {
+        return [NSString stringWithFormat:@"%.1fK", value / 1000.0];
+    }
+    return [NSString stringWithFormat:@"%.0f", value];
+}
+
+- (NSView *)totalQuotaCard {
+    NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.heightAnchor constraintEqualToConstant:142].active = YES;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    stack.alignment = NSLayoutAttributeCenterY;
+    stack.spacing = 14;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(14, 14, 14, 14)];
+
+    NSInteger quotaAccounts = 0;
+    NSInteger unknownQuota = 0;
+    double remain5h = 0;
+    double remain7d = 0;
+    for (NSDictionary *account in self.accounts) {
+        if (!CPBool(account[@"enabled"]) || !CPBool(account[@"has_tokens"])) {
+            continue;
+        }
+        quotaAccounts += 1;
+        NSString *name = CPString(account[@"name"]);
+        NSDictionary *quota = CPDict(self.quotaSnapshot[name]);
+        if (!quota.count || quota[@"error"]) {
+            unknownQuota += 1;
+        }
+        remain5h += [self quotaRemainingForAccountName:name weekly:NO];
+        remain7d += [self quotaRemainingForAccountName:name weekly:YES];
+    }
+    double capacity = quotaAccounts * 100.0;
+    double averageRemain = capacity > 0 ? ((remain5h + remain7d) / 2.0) / capacity : 0;
+
+    CPQuotaRingView *ring = [[CPQuotaRingView alloc] init];
+    ring.translatesAutoresizingMaskIntoConstraints = NO;
+    ring.progress = averageRemain;
+    ring.centerText = capacity > 0 ? [NSString stringWithFormat:@"%.0f%%", averageRemain * 100] : @"-";
+    [ring.widthAnchor constraintEqualToConstant:96].active = YES;
+    [ring.heightAnchor constraintEqualToConstant:96].active = YES;
+    [stack addArrangedSubview:ring];
+
+    NSStackView *labels = [[NSStackView alloc] init];
+    labels.orientation = NSUserInterfaceLayoutOrientationVertical;
+    labels.spacing = 7;
+    [labels addArrangedSubview:[self labelWithText:@"总额度" font:[NSFont systemFontOfSize:17 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [labels addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"总容量 %.0f%% · %@ 个账号", capacity, @(quotaAccounts)] font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
+    [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"5h 剩余" value:remain5h color:NSColor.controlAccentColor capacity:capacity]];
+    [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"7d 剩余" value:remain7d color:NSColor.systemGreenColor capacity:capacity]];
+    if (unknownQuota > 0) {
+        [labels addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"%ld 个账号额度等待刷新", (long)unknownQuota] font:[NSFont systemFontOfSize:11 weight:NSFontWeightRegular] color:NSColor.systemOrangeColor]];
+    }
+    [stack addArrangedSubview:labels];
+    return card;
+}
+
+- (NSView *)quotaSummaryLineWithTitle:(NSString *)title value:(double)value color:(NSColor *)color capacity:(double)capacity {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8;
+    [row addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor]];
+    NSTextField *valueLabel = [self labelWithText:[NSString stringWithFormat:@"%.0f%%", value] font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:color];
+    [valueLabel.widthAnchor constraintEqualToConstant:52].active = YES;
+    [row addArrangedSubview:valueLabel];
+    NSProgressIndicator *progress = [self progressWithValue:capacity > 0 ? (value / capacity) * 100.0 : 0];
+    [row addArrangedSubview:progress];
+    return row;
+}
+
+- (NSView *)tokenStatsCard {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.spacing = 8;
+    row.distribution = NSStackViewDistributionFillEqually;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSDictionary *total = [self tokenUsageTotal];
+    NSArray *daily = CPArray(self.tokenUsageSnapshot[@"daily"]);
+    double todayTokens = daily.count ? CPDouble(daily.lastObject[@"total_tokens"]) : 0;
+    double weeklyTokens = 0;
+    NSArray *weekly = CPArray(self.tokenUsageSnapshot[@"weekly"]);
+    if (weekly.count) {
+        weeklyTokens = CPDouble(weekly.lastObject[@"total_tokens"]);
+    }
+    [row addArrangedSubview:[self metricCardWithTitle:@"今日 Token" value:[self formatTokenCount:todayTokens] detail:@"精确捕获" color:NSColor.controlAccentColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"本周 Token" value:[self formatTokenCount:weeklyTokens] detail:@"精确捕获" color:NSColor.systemGreenColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"未知请求" value:[NSString stringWithFormat:@"%.0f", CPDouble(total[@"unknown_requests"])] detail:@"无 usage" color:NSColor.systemOrangeColor]];
+    return row;
+}
+
+- (NSView *)tokenBarChartCard {
+    NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.heightAnchor constraintEqualToConstant:150].active = YES;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 10, 12)];
+
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    [header addArrangedSubview:[self labelWithText:@"Token 消耗" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
+    control.segmentCount = 2;
+    [control setLabel:@"每日" forSegment:0];
+    [control setLabel:@"每周" forSegment:1];
+    control.selectedSegment = self.tokenUsageMode;
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.target = self;
+    control.action = @selector(tokenUsageModeAction:);
+    control.controlSize = NSControlSizeSmall;
+    [control.widthAnchor constraintEqualToConstant:112].active = YES;
+    [header addArrangedSubview:control];
+    [stack addArrangedSubview:header];
+
+    CPBarChartView *chart = [[CPBarChartView alloc] init];
+    chart.rows = [self tokenUsageRows];
+    chart.translatesAutoresizingMaskIntoConstraints = NO;
+    [chart.heightAnchor constraintEqualToConstant:88].active = YES;
+    [stack addArrangedSubview:chart];
+    return card;
+}
+
+- (NSView *)tokenHeatmapCard {
+    NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.heightAnchor constraintEqualToConstant:138].active = YES;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 6;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 10, 12)];
+
+    NSDictionary *total = [self tokenUsageTotal];
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    [header addArrangedSubview:[self labelWithText:@"Token 活动" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+    [header addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"总量 %@ tokens", [self formatTokenCount:CPDouble(total[@"total_tokens"])]] font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:NSColor.secondaryLabelColor]];
+    [stack addArrangedSubview:header];
+
+    CPHeatmapView *heatmap = [[CPHeatmapView alloc] init];
+    heatmap.rows = [self tokenUsageRows];
+    heatmap.translatesAutoresizingMaskIntoConstraints = NO;
+    [heatmap.heightAnchor constraintEqualToConstant:84].active = YES;
+    [stack addArrangedSubview:heatmap];
+    return card;
 }
 
 - (NSString *)strategyTitleForValue:(NSString *)value {
@@ -1269,7 +1586,7 @@ static NSString *CPRelativeTime(id epochValue) {
     for (NSString *path in paths) {
         NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
         if (image) {
-            image.accessibilityDescription = @"Codex Proxy 控制台";
+            image.accessibilityDescription = @"小腊肠";
             return image;
         }
     }
@@ -1288,7 +1605,7 @@ static NSString *CPRelativeTime(id epochValue) {
         imageView.image = image;
         imageView.imageScaling = NSImageScaleProportionallyUpOrDown;
         imageView.translatesAutoresizingMaskIntoConstraints = NO;
-        imageView.accessibilityLabel = @"Codex Proxy 控制台";
+        imageView.accessibilityLabel = @"小腊肠";
         [container addSubview:imageView];
         [NSLayoutConstraint activateConstraints:@[
             [imageView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
@@ -1427,6 +1744,7 @@ static NSString *CPRelativeTime(id epochValue) {
 
         NSArray *accounts = @[];
         NSDictionary *quota = @{};
+        NSDictionary *tokenUsage = @{};
         if (proxyOnline) {
             id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
             if ([remoteAccounts isKindOfClass:NSArray.class]) {
@@ -1435,6 +1753,10 @@ static NSString *CPRelativeTime(id epochValue) {
             id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
             if ([remoteQuota isKindOfClass:NSDictionary.class]) {
                 quota = remoteQuota;
+            }
+            id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage" method:@"GET" timeout:2.0];
+            if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
+                tokenUsage = remoteTokenUsage;
             }
         }
         if (!accounts.count) {
@@ -1452,6 +1774,7 @@ static NSString *CPRelativeTime(id epochValue) {
             self.statusSnapshot = status ?: @{};
             self.accounts = accounts ?: @[];
             self.quotaSnapshot = quota ?: @{};
+            self.tokenUsageSnapshot = tokenUsage ?: @{};
             if (!self.selectedAccountName.length && self.accounts.count) {
                 self.selectedAccountName = CPString(self.accounts.firstObject[@"name"]);
             }
@@ -1475,6 +1798,7 @@ static NSString *CPRelativeTime(id epochValue) {
         id remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
         id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
         id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
+        id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage" method:@"GET" timeout:2.0];
         dispatch_async(dispatch_get_main_queue(), ^{
             NSDictionary *accounts = CPDict(result[@"accounts"]);
             NSInteger refreshed = 0;
@@ -1504,6 +1828,9 @@ static NSString *CPRelativeTime(id epochValue) {
             if ([remoteQuota isKindOfClass:NSDictionary.class]) {
                 self.quotaSnapshot = remoteQuota;
             }
+            if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
+                self.tokenUsageSnapshot = remoteTokenUsage;
+            }
             [self updateStatusViews];
             [self renderActiveSection];
             [self setBusy:NO message:message];
@@ -1526,11 +1853,12 @@ static NSString *CPRelativeTime(id epochValue) {
 
 - (void)updateHeaderText {
     NSDictionary *titles = @{
-        @"dashboard": @[@"总览", @"代理、账号池和运行状态。"],
+        @"overview": @[@"总览", @"额度和 Token 活动。"],
+        @"accounts": @[@"账号", @"代理、账号池和运行状态。"],
         @"config": @[@"配置", @"检查 LaunchAgent、代理模式和策略。"],
         @"logs": @[@"日志", @"查看操作结果、日志和路径诊断。"],
     };
-    NSArray *pair = titles[self.activeSection] ?: titles[@"dashboard"];
+    NSArray *pair = titles[self.activeSection] ?: titles[@"overview"];
     self.titleLabel.stringValue = pair[0];
     BOOL running = CPBool(self.statusSnapshot[@"running"]);
     NSString *state = running ? @"代理在线" : @"代理离线";
@@ -1605,7 +1933,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)repairAction:(id)sender {
-    [self performAction:@[@"repair"] label:@"启动/修复" refreshAfter:YES];
+    [self performAction:@[@"repair"] label:@"启动" refreshAfter:YES];
 }
 
 - (void)enableProxyAction:(id)sender {
@@ -1636,6 +1964,11 @@ static NSString *CPRelativeTime(id epochValue) {
     [self performAction:@[@"set-rotation-strategy", @"--strategy", strategy]
                   label:[NSString stringWithFormat:@"切换选择策略为 %@", [self strategyTitleForValue:strategy]]
            refreshAfter:YES];
+}
+
+- (void)tokenUsageModeAction:(NSSegmentedControl *)sender {
+    self.tokenUsageMode = sender.selectedSegment == 1 ? 1 : 0;
+    [self renderActiveSection];
 }
 
 - (void)streamModeAction:(NSSegmentedControl *)sender {
@@ -1859,7 +2192,26 @@ static NSString *CPRelativeTime(id epochValue) {
         }
         return NO;
     }
+    [self migrateLegacyRuntimeIfNeeded];
     return [self copyRuntimeResourcesForce:NO error:error];
+}
+
+- (void)migrateLegacyRuntimeIfNeeded {
+    NSString *legacy = [@"~/Library/Application Support/codexproxyapi" stringByExpandingTildeInPath];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if ([fm fileExistsAtPath:self.runtimeDir isDirectory:&isDir]) {
+        return;
+    }
+    if (![fm fileExistsAtPath:legacy isDirectory:&isDir] || !isDir) {
+        return;
+    }
+    NSError *error = nil;
+    if ([fm copyItemAtPath:legacy toPath:self.runtimeDir error:&error]) {
+        [self appendLog:@"已从旧运行目录迁移账号、配置和统计数据。"];
+    } else {
+        [self appendLog:[NSString stringWithFormat:@"旧运行目录迁移失败：%@", error.localizedDescription]];
+    }
 }
 
 - (BOOL)copyRuntimeResourcesForce:(BOOL)force error:(NSError **)error {
@@ -2061,7 +2413,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)writeResultWithTitle:(NSString *)title body:(NSString *)body {
-    NSString *content = [NSString stringWithFormat:@"Codex 代理控制台\n操作：%@\n时间：%@\n\n%@\n\n日志：%@\n",
+    NSString *content = [NSString stringWithFormat:@"小腊肠\n操作：%@\n时间：%@\n\n%@\n\n日志：%@\n",
                          title,
                          NSDate.date,
                          body ?: @"",
@@ -2391,7 +2743,7 @@ static NSString *CPRelativeTime(id epochValue) {
 #pragma mark - Navigation
 
 - (void)navigationAction:(NSButton *)sender {
-    NSArray *ids = @[@"dashboard", @"config", @"logs"];
+    NSArray *ids = @[@"overview", @"accounts", @"config", @"logs"];
     if (sender.tag >= 0 && sender.tag < ids.count) {
         self.activeSection = ids[sender.tag];
         [self updateNavigationSelection];
@@ -2400,7 +2752,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)updateNavigationSelection {
-    NSArray *ids = @[@"dashboard", @"config", @"logs"];
+    NSArray *ids = @[@"overview", @"accounts", @"config", @"logs"];
     for (NSButton *button in self.navButtons) {
         BOOL selected = button.tag >= 0 && button.tag < ids.count && [ids[button.tag] isEqualToString:self.activeSection];
         button.state = selected ? NSControlStateValueOn : NSControlStateValueOff;

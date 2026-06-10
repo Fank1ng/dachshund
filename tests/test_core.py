@@ -24,6 +24,7 @@ import proxy
 import proxy_core
 import quota_tracker
 import service_manager
+import usage_stats
 from account_manager import Account, AccountNameError, AccountPool, validate_account_name
 from config import ConfigError, validate
 from proxy_core import (
@@ -60,6 +61,13 @@ from proxy_core import (
     _websocket_heartbeat_seconds,
     _websocket_target_url,
 )
+from usage_stats import (
+    extract_usage_from_json,
+    extract_usage_from_sse_bytes,
+    record_request_usage,
+)
+
+usage_stats.USAGE_STATS_FILE = Path(tempfile.mkdtemp()) / "usage_stats.json"
 
 
 class ConfigTests(unittest.TestCase):
@@ -288,6 +296,82 @@ class AccountTests(unittest.TestCase):
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
 
+class UsageStatsTests(unittest.TestCase):
+    def test_extract_usage_from_nested_json(self):
+        payload = {
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "total_tokens": 20,
+                }
+            },
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["input_tokens"], 12)
+        self.assertEqual(usage["output_tokens"], 8)
+        self.assertEqual(usage["total_tokens"], 20)
+
+    def test_extract_usage_from_sse_uses_largest_total(self):
+        body = (
+            b"data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}\n\n"
+            b"data: {\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n"
+        )
+
+        usage = extract_usage_from_sse_bytes(body)
+
+        self.assertEqual(usage["total_tokens"], 15)
+
+    def test_record_request_usage_summarizes_daily_weekly_and_dedupes(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file):
+            record_request_usage(
+                request_id="req-1",
+                account="a",
+                path="/backend-api/codex/responses",
+                usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            )
+            record_request_usage(
+                request_id="req-1",
+                account="a",
+                path="/backend-api/codex/responses",
+                usage={"input_tokens": 999, "output_tokens": 999, "total_tokens": 1998},
+            )
+            record_request_usage(
+                request_id="req-2",
+                account="a",
+                path="/backend-api/codex/responses",
+                usage=None,
+            )
+            summary = usage_stats.summary()
+
+        self.assertEqual(len(summary["daily"]), 31)
+        self.assertEqual(len(summary["weekly"]), 53)
+        self.assertEqual(summary["total"]["total_tokens"], 15)
+        self.assertEqual(summary["total"]["requests"], 2)
+        self.assertEqual(summary["total"]["unknown_requests"], 1)
+        self.assertTrue(any(day["total_tokens"] == 15 for day in summary["daily"]))
+
+    def test_token_usage_api_returns_summary(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file):
+            record_request_usage(
+                request_id="req-api",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+            )
+            response = asyncio.run(proxy.api_token_usage(mock.Mock()))
+            data = json.loads(response.text)
+
+        self.assertEqual(data["total"]["total_tokens"], 5)
+        self.assertEqual(len(data["daily"]), 31)
+        self.assertEqual(len(data["weekly"]), 53)
+
+
 class ControlActionsTests(unittest.TestCase):
     def test_clear_auth_error_local_reenables_account(self):
         old_accounts_dir = account_manager.ACCOUNTS_DIR
@@ -426,6 +510,19 @@ class ControlActionsTests(unittest.TestCase):
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_migrate_legacy_runtime_copies_without_removing_old_data(self):
+        with tempfile.TemporaryDirectory() as old_tmp, tempfile.TemporaryDirectory() as parent_tmp:
+            old_runtime = Path(old_tmp)
+            new_runtime = Path(parent_tmp) / "xiaolachang"
+            (old_runtime / "accounts" / "a").mkdir(parents=True)
+            (old_runtime / "accounts" / "a" / "auth.json").write_text("{}\n")
+            with mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", new_runtime):
+                service_manager._migrate_legacy_runtime()
+
+            self.assertTrue((new_runtime / "accounts" / "a" / "auth.json").exists())
+            self.assertTrue((old_runtime / "accounts" / "a" / "auth.json").exists())
+
     def test_sync_runtime_replaces_code_dirs_and_preserves_user_state(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
             source = Path(source_tmp)

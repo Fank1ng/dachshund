@@ -4,7 +4,7 @@ set -euo pipefail
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
 CORE_DIR="$MAC_DIR/core"
-APP="$ROOT/Codex Proxy Control.app"
+APP="$ROOT/小腊肠.app"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
@@ -12,7 +12,7 @@ APP_ICON="$CORE_DIR/static/icons/AppIcon.icns"
 APP_VERSION="${APP_VERSION:-0.5.4}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
-SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
+SIGNED_APP="${SIGNED_APP:-/private/tmp/小腊肠.app}"
 
 clear_bundle_xattrs() {
   local target="$1"
@@ -83,15 +83,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleExecutable</key>
-  <string>Codex Proxy Control</string>
+  <string>小腊肠</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.fank1ng.codexproxycontrol</string>
+  <string>com.fank1ng.xiaolachang</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Codex Proxy Control</string>
+  <string>小腊肠</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -159,8 +159,8 @@ for package in packages:
         shutil.copy2(src, dst)
 PY
 
-clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/Codex Proxy Control"
-chmod +x "$APP/Contents/MacOS/Codex Proxy Control"
+clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/小腊肠"
+chmod +x "$APP/Contents/MacOS/小腊肠"
 
 find "$APP" -name ".DS_Store" -delete
 find "$RUNTIME" \( -name "*.log" -o -name "recent_requests.json" \) -delete
