@@ -5,7 +5,7 @@
 `小腊肠.app` 是 macOS 主要管理入口。日常状态、账号、额度和代理确认都在 App 里查看。
 
 macOS 使用 `小腊肠.app`，Windows 11 使用
-`CodexProxyControlSetup-0.5.1-win-x64.exe` 安装控制端。
+`CodexProxyControlSetup-0.6.5-win-x64.exe` 安装控制端。
 
 ## Mac 首次运行
 
@@ -87,7 +87,7 @@ App 打开后，点击顶部的“启动”。
 从 GitHub Releases 下载 Windows 安装包：
 
 ```text
-CodexProxyControlSetup-0.5.1-win-x64.exe
+CodexProxyControlSetup-0.6.5-win-x64.exe
 ```
 
 安装包默认安装到：
@@ -112,7 +112,7 @@ CodexProxyControlSetup-0.5.1-win-x64.exe
 如果文件是从浏览器下载的，可以在 PowerShell 中解除下载标记：
 
 ```powershell
-Unblock-File .\CodexProxyControlSetup-0.5.1-win-x64.exe
+Unblock-File .\CodexProxyControlSetup-0.6.5-win-x64.exe
 ```
 
 如果 Smart App Control 直接阻止运行，Windows 通常不会提供单次放行按钮。

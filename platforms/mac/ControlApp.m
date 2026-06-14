@@ -132,15 +132,20 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     NSInteger requests = (NSInteger)CPDouble(row[@"requests"]);
     NSInteger unknown = (NSInteger)CPDouble(row[@"unknown_requests"]);
     NSInteger known = MAX(0, requests - unknown);
-    return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\nReasoning %@ · Cached %@\nCache read %@ · Cache create %@\n请求 %ld · 已知 %ld · 未知 %ld\n本地代理捕获口径",
+    double cacheReadTokens = CPDouble(row[@"cache_read_tokens"]);
+    double cacheCreationTokens = CPDouble(row[@"cache_creation_tokens"]);
+    double cacheTokens = (cacheReadTokens || cacheCreationTokens)
+        ? cacheReadTokens + cacheCreationTokens
+        : MAX(CPDouble(row[@"cached_tokens"]), CPDouble(row[@"cache_tokens"]));
+    BOOL cacheObserved = CPDouble(row[@"cache_tokens_observed_requests"]) > 0 || CPBool(row[@"cache_tokens_observed"]);
+    BOOL reasoningObserved = CPDouble(row[@"reasoning_tokens_observed_requests"]) > 0 || CPBool(row[@"reasoning_tokens_observed"]);
+    return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\n缓存 %@\n推理 %@\n请求 %ld · 已知 %ld · 未知 %ld\n本地代理捕获口径",
             CPTokenUsagePeriodLabel(row),
             CPExactTokenCount(row[@"total_tokens"]),
             CPExactTokenCount(row[@"input_tokens"]),
             CPExactTokenCount(row[@"output_tokens"]),
-            CPExactTokenCount(row[@"reasoning_tokens"]),
-            CPExactTokenCount(row[@"cached_tokens"]),
-            CPExactTokenCount(row[@"cache_read_tokens"]),
-            CPExactTokenCount(row[@"cache_creation_tokens"]),
+            cacheObserved ? CPExactTokenCount(@(cacheTokens)) : @"-",
+            reasoningObserved ? CPExactTokenCount(row[@"reasoning_tokens"]) : @"-",
             (long)requests,
             (long)known,
             (long)unknown];
@@ -197,6 +202,8 @@ static NSColor *CPSidebarBorderColor(void) {
 @property(nonatomic, strong) NSTableView *accountTable;
 @property(nonatomic, strong) NSMutableArray<NSButton *> *buttons;
 @property(nonatomic, strong) NSMutableArray<NSButton *> *navButtons;
+@property(nonatomic, strong) NSMutableArray<NSImageView *> *navIconViews;
+@property(nonatomic, strong) NSMutableArray<NSTextField *> *navTitleLabels;
 @property(nonatomic, strong) NSArray<NSDictionary *> *accounts;
 @property(nonatomic, strong) NSDictionary *statusSnapshot;
 @property(nonatomic, strong) NSDictionary *quotaSnapshot;
@@ -333,8 +340,8 @@ static NSColor *CPSidebarBorderColor(void) {
 
     NSString *text = self.centerText.length ? self.centerText : @"-";
     NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:17 weight:NSFontWeightBold],
-        NSForegroundColorAttributeName: NSColor.labelColor,
+        NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:22 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName: self.ringColor ?: NSColor.controlAccentColor,
     };
     NSSize size = [text sizeWithAttributes:attrs];
     [text drawAtPoint:NSMakePoint(center.x - size.width / 2, center.y - size.height / 2) withAttributes:attrs];
@@ -561,6 +568,8 @@ static NSColor *CPSidebarBorderColor(void) {
     _logPath = [_runtimeDir stringByAppendingPathComponent:@"control-app.log"];
     _buttons = [NSMutableArray array];
     _navButtons = [NSMutableArray array];
+    _navIconViews = [NSMutableArray array];
+    _navTitleLabels = [NSMutableArray array];
     _accounts = @[];
     _statusSnapshot = @{};
     _quotaSnapshot = @{};
@@ -687,8 +696,13 @@ static NSColor *CPSidebarBorderColor(void) {
     NSPoint windowPoint = [self.toolbarStack convertPoint:toolbarCenter toView:nil];
     NSPoint targetPoint = [buttonSuperview convertPoint:windowPoint fromView:nil];
     CGFloat targetCenterY = targetPoint.y;
+    NSPoint navIconLeftInContent = NSMakePoint(20, 0);
+    NSPoint navIconLeftInWindow = [self.window.contentView convertPoint:navIconLeftInContent toView:nil];
+    NSPoint navIconLeftInButtonSuperview = [buttonSuperview convertPoint:navIconLeftInWindow fromView:nil];
+    CGFloat deltaX = round(navIconLeftInButtonSuperview.x - closeButton.frame.origin.x);
     for (NSButton *button in @[closeButton, miniaturizeButton, zoomButton]) {
         NSRect frame = button.frame;
+        frame.origin.x = round(frame.origin.x + deltaX);
         frame.origin.y = round(targetCenterY - (frame.size.height / 2.0));
         button.frame = frame;
     }
@@ -887,7 +901,7 @@ static NSColor *CPSidebarBorderColor(void) {
     if ([self shouldShowSetupCard]) {
         [self.contentStack addArrangedSubview:[self constrainedContentView:[self setupChecklistCard] width:450]];
     }
-    if ([self hasRuntimeManifestMismatch] || [self hasVersionMismatch]) {
+    if ([self hasRuntimeManifestMismatch] || [self hasVersionMismatch] || [self hasUsageStorageMismatch]) {
         [self.contentStack addArrangedSubview:[self constrainedContentView:[self runtimeSyncCard] width:450]];
     }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self proxyConfirmationCard] width:450]];
@@ -953,6 +967,17 @@ static NSColor *CPSidebarBorderColor(void) {
     }
     NSDictionary *manifest = [self runtimeManifestSnapshot];
     return manifest.count > 0 && manifest[@"ok"] && !CPBool(manifest[@"ok"]);
+}
+
+- (BOOL)hasUsageStorageMismatch {
+    NSDictionary *usage = CPDict(self.statusSnapshot[@"usage"]);
+    if (!usage.count) {
+        return NO;
+    }
+    if (usage[@"observed_columns_ok"] && !CPBool(usage[@"observed_columns_ok"])) {
+        return YES;
+    }
+    return NO;
 }
 
 - (NSString *)runtimeManifestFilesSummary {
@@ -1035,6 +1060,7 @@ static NSColor *CPSidebarBorderColor(void) {
 - (NSView *)runtimeSyncCard {
     BOOL versionMismatch = [self hasVersionMismatch];
     BOOL manifestMismatch = [self hasRuntimeManifestMismatch] && !versionMismatch;
+    BOOL usageMismatch = [self hasUsageStorageMismatch] && !versionMismatch && !manifestMismatch;
     NSView *card = [self cardViewWithBackground:[[NSColor systemOrangeColor] colorWithAlphaComponent:0.12]];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     NSStackView *stack = [[NSStackView alloc] init];
@@ -1043,12 +1069,16 @@ static NSColor *CPSidebarBorderColor(void) {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
-    [stack addArrangedSubview:[self labelWithText:manifestMismatch ? @"运行文件未同步" : @"版本不同步"
+    NSString *title = usageMismatch ? @"Token 统计未迁移" : (manifestMismatch ? @"运行文件未同步" : @"版本不同步");
+    [stack addArrangedSubview:[self labelWithText:title
                                              font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold]
                                             color:NSColor.systemOrangeColor]];
-    NSString *message = manifestMismatch
-        ? @"运行目录中的文件与当前 App 内置文件不一致。点击同步运行文件后，小腊肠会更新后台运行文件并重启代理。"
-        : @"后台或运行目录版本与当前 App 不一致。请退出并重新打开小腊肠，或点击启动/修复同步后台。";
+    NSString *message = @"后台或运行目录版本与当前 App 不一致。请退出并重新打开小腊肠，或点击启动/修复同步后台。";
+    if (manifestMismatch) {
+        message = @"运行目录中的文件与当前 App 内置文件不一致。点击同步运行文件后，小腊肠会更新后台运行文件并重启代理。";
+    } else if (usageMismatch) {
+        message = @"Token 统计库还没有完成缓存/推理捕获状态迁移。点击启动/修复会重启后台并触发迁移。";
+    }
     [stack addArrangedSubview:[self emptyStateLabel:message]];
     NSString *fileSummary = [self runtimeManifestFilesSummary];
     if (manifestMismatch && fileSummary.length) {
@@ -1543,13 +1573,14 @@ static NSColor *CPSidebarBorderColor(void) {
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     stack.alignment = NSLayoutAttributeCenterY;
-    stack.spacing = 14;
+    stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(14, 14, 14, 14)];
 
     NSInteger quotaAccounts = 0;
     NSInteger unknownQuota = 0;
+    NSTimeInterval latestFetched = 0;
     double remain5h = 0;
     double remain7d = 0;
     for (NSDictionary *account in self.accounts) {
@@ -1561,6 +1592,8 @@ static NSColor *CPSidebarBorderColor(void) {
         NSDictionary *quota = CPDict(self.quotaSnapshot[name]);
         if (!quota.count || quota[@"error"]) {
             unknownQuota += 1;
+        } else {
+            latestFetched = MAX(latestFetched, CPDouble(quota[@"_fetched_at"]));
         }
         remain5h += [self quotaRemainingForAccountName:name weekly:NO];
         remain7d += [self quotaRemainingForAccountName:name weekly:YES];
@@ -1569,42 +1602,61 @@ static NSColor *CPSidebarBorderColor(void) {
     double remain5hRatio = capacity > 0 ? remain5h / capacity : 0;
     double remain7dRatio = capacity > 0 ? remain7d / capacity : 0;
 
-    NSStackView *rings = [[NSStackView alloc] init];
-    rings.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    rings.alignment = NSLayoutAttributeCenterY;
-    rings.spacing = 10;
-    [rings addArrangedSubview:[self quotaRingWithTitle:@"5h" progress:remain5hRatio color:NSColor.controlAccentColor]];
-    [rings addArrangedSubview:[self quotaRingWithTitle:@"7d" progress:remain7dRatio color:NSColor.systemGreenColor]];
-    [stack addArrangedSubview:rings];
-
     NSStackView *labels = [[NSStackView alloc] init];
     labels.orientation = NSUserInterfaceLayoutOrientationVertical;
     labels.spacing = 7;
     [labels addArrangedSubview:[self labelWithText:@"账号额度" font:[NSFont systemFontOfSize:17 weight:NSFontWeightBold] color:NSColor.labelColor]];
-    [labels addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"总容量 %.0f%% · %@ 个账号", capacity, @(quotaAccounts)] font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
-    [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"5h 剩余" value:remain5h color:NSColor.controlAccentColor capacity:capacity]];
-    [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"7d 剩余" value:remain7d color:NSColor.systemGreenColor capacity:capacity]];
+    NSString *accountText = quotaAccounts > 0 ? [NSString stringWithFormat:@"%@ 个可用账号", @(quotaAccounts)] : @"暂无可用账号";
     if (unknownQuota > 0) {
-        [labels addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"%ld 个账号额度等待刷新", (long)unknownQuota] font:[NSFont systemFontOfSize:11 weight:NSFontWeightRegular] color:NSColor.systemOrangeColor]];
+        accountText = [accountText stringByAppendingFormat:@" · %ld 个额度等待刷新", (long)unknownQuota];
     }
+    NSTextField *accountLabel = [self labelWithText:accountText
+                                               font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]
+                                              color:unknownQuota > 0 ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor];
+    accountLabel.maximumNumberOfLines = 1;
+    accountLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [labels addArrangedSubview:accountLabel];
+    NSString *refreshText = latestFetched > 0 ? [NSString stringWithFormat:@"刷新 %@", CPRelativeTime(@(latestFetched))] : @"未刷新";
+    [labels addArrangedSubview:[self labelWithText:refreshText
+                                              font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]
+                                             color:NSColor.secondaryLabelColor]];
+    [labels.widthAnchor constraintEqualToConstant:160].active = YES;
     [stack addArrangedSubview:labels];
+
+    NSStackView *rings = [[NSStackView alloc] init];
+    rings.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    rings.alignment = NSLayoutAttributeCenterY;
+    rings.spacing = 18;
+    [rings addArrangedSubview:[self quotaRingWithTitle:@"5h"
+                                              progress:remain5hRatio
+                                            captionText:[NSString stringWithFormat:@"%.0f%% / %.0f%%", remain5h, capacity]
+                                                 color:NSColor.controlAccentColor]];
+    [rings addArrangedSubview:[self quotaRingWithTitle:@"7d"
+                                              progress:remain7dRatio
+                                            captionText:[NSString stringWithFormat:@"%.0f%% / %.0f%%", remain7d, capacity]
+                                                 color:NSColor.systemGreenColor]];
+    [stack addArrangedSubview:rings];
     return card;
 }
 
-- (NSView *)quotaRingWithTitle:(NSString *)title progress:(double)progress color:(NSColor *)color {
+- (NSView *)quotaRingWithTitle:(NSString *)title progress:(double)progress captionText:(NSString *)captionText color:(NSColor *)color {
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeCenterX;
-    stack.spacing = 3;
+    stack.spacing = 6;
     CPQuotaRingView *ring = [[CPQuotaRingView alloc] init];
     ring.translatesAutoresizingMaskIntoConstraints = NO;
     ring.progress = progress;
     ring.ringColor = color;
-    ring.centerText = [NSString stringWithFormat:@"%.0f%%", progress * 100];
-    [ring.widthAnchor constraintEqualToConstant:72].active = YES;
-    [ring.heightAnchor constraintEqualToConstant:72].active = YES;
+    ring.centerText = title ?: @"-";
+    [ring.widthAnchor constraintEqualToConstant:92].active = YES;
+    [ring.heightAnchor constraintEqualToConstant:92].active = YES;
     [stack addArrangedSubview:ring];
-    [stack addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:color]];
+    NSTextField *caption = [self labelWithText:captionText ?: @"-"
+                                          font:[NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightSemibold]
+                                         color:color];
+    caption.alignment = NSTextAlignmentCenter;
+    [stack addArrangedSubview:caption];
     return stack;
 }
 
@@ -1643,9 +1695,10 @@ static NSColor *CPSidebarBorderColor(void) {
     if (weekly.count) {
         weeklyTokens = CPDouble(weekly.lastObject[@"total_tokens"]);
     }
+    double knownRequests = MAX(0, CPDouble(total[@"requests"]) - CPDouble(total[@"unknown_requests"]));
     [row addArrangedSubview:[self metricCardWithTitle:@"今日 Token" value:[self formatTokenCount:todayTokens] detail:@"" color:NSColor.controlAccentColor]];
     [row addArrangedSubview:[self metricCardWithTitle:@"本周 Token" value:[self formatTokenCount:weeklyTokens] detail:@"" color:NSColor.systemGreenColor]];
-    [row addArrangedSubview:[self metricCardWithTitle:@"请求数" value:[NSString stringWithFormat:@"%.0f", CPDouble(total[@"requests"])] detail:@"" color:NSColor.systemOrangeColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"请求数" value:[NSString stringWithFormat:@"%.0f", knownRequests] detail:@"" color:NSColor.systemOrangeColor]];
     return row;
 }
 
@@ -2042,7 +2095,8 @@ static NSColor *CPSidebarBorderColor(void) {
     row.translatesAutoresizingMaskIntoConstraints = NO;
     BOOL runtimeMismatch = [self hasRuntimeManifestMismatch];
     BOOL versionMismatch = [self hasVersionMismatch];
-    BOOL repairNeeded = CPBool(self.statusSnapshot[@"needs_repair"]) || runtimeMismatch || versionMismatch;
+    BOOL usageMismatch = [self hasUsageStorageMismatch];
+    BOOL repairNeeded = CPBool(self.statusSnapshot[@"needs_repair"]) || runtimeMismatch || versionMismatch || usageMismatch;
     NSString *repairValue = @"正常";
     NSString *repairDetail = @"后台服务路径";
     NSColor *repairColor = NSColor.systemGreenColor;
@@ -2053,6 +2107,10 @@ static NSColor *CPSidebarBorderColor(void) {
     } else if (runtimeMismatch) {
         repairValue = @"需同步";
         repairDetail = @"运行文件未同步";
+        repairColor = NSColor.systemOrangeColor;
+    } else if (usageMismatch) {
+        repairValue = @"需迁移";
+        repairDetail = @"Token 统计库未迁移";
         repairColor = NSColor.systemOrangeColor;
     } else if (repairNeeded) {
         repairValue = @"需要修复";
@@ -2437,21 +2495,46 @@ static NSColor *CPSidebarBorderColor(void) {
 }
 
 - (NSButton *)navigationButtonWithTitle:(NSString *)title symbol:(NSString *)symbol tag:(NSInteger)tag {
-    NSButton *button = [NSButton buttonWithTitle:title target:self action:@selector(navigationAction:)];
+    NSButton *button = [NSButton buttonWithTitle:@"" target:self action:@selector(navigationAction:)];
     button.tag = tag;
     button.bordered = NO;
-    button.alignment = NSTextAlignmentLeft;
-    button.imagePosition = NSImageLeading;
     button.contentTintColor = NSColor.labelColor;
-    button.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.wantsLayer = YES;
     button.layer.cornerRadius = 9;
     button.layer.masksToBounds = YES;
+
+    NSImageView *iconView = [[NSImageView alloc] init];
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    iconView.imageScaling = NSImageScaleProportionallyDown;
+    iconView.contentTintColor = NSColor.labelColor;
     NSImage *image = [self symbolImageNamed:symbol];
     if (image) {
-        button.image = image;
+        image.template = YES;
+        iconView.image = image;
     }
+
+    NSTextField *titleLabel = [self labelWithText:title
+                                             font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
+                                            color:NSColor.labelColor];
+    titleLabel.alignment = NSTextAlignmentLeft;
+    titleLabel.maximumNumberOfLines = 1;
+
+    [button addSubview:iconView];
+    [button addSubview:titleLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [iconView.centerXAnchor constraintEqualToAnchor:button.leadingAnchor constant:18],
+        [iconView.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+        [iconView.widthAnchor constraintEqualToConstant:17],
+        [iconView.heightAnchor constraintEqualToConstant:17],
+
+        [titleLabel.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:38],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:-8],
+        [titleLabel.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+    ]];
+    [self.navIconViews addObject:iconView];
+    [self.navTitleLabels addObject:titleLabel];
+
     [button.widthAnchor constraintEqualToConstant:90].active = YES;
     [button.heightAnchor constraintEqualToConstant:34].active = YES;
     return button;
@@ -3755,6 +3838,14 @@ static NSColor *CPSidebarBorderColor(void) {
         button.layer.borderWidth = selected ? 0.5 : 0;
         button.layer.borderColor = selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.30].CGColor : NSColor.clearColor.CGColor;
         button.contentTintColor = selected ? NSColor.controlAccentColor : NSColor.labelColor;
+        NSUInteger index = [self.navButtons indexOfObject:button];
+        NSColor *tint = selected ? NSColor.controlAccentColor : NSColor.labelColor;
+        if (index != NSNotFound && index < self.navIconViews.count) {
+            self.navIconViews[index].contentTintColor = tint;
+        }
+        if (index != NSNotFound && index < self.navTitleLabels.count) {
+            self.navTitleLabels[index].textColor = tint;
+        }
     }
 }
 

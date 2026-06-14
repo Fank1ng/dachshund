@@ -68,6 +68,7 @@ KEY_LABELS = {
     "manifest_error": "Manifest 错误",
     "token_usage_api_ok": "Token 汇总接口",
     "token_usage_events_api_ok": "Token 事件接口",
+    "token_usage_schema_ok": "Token 捕获状态表结构",
     "frontend_restart_required": "需要重开前台",
     "updated": "已更新",
     "rolled_back": "已回滚",
@@ -263,6 +264,7 @@ def compact(data: dict) -> str:
         "manifest_error",
         "token_usage_api_ok",
         "token_usage_events_api_ok",
+        "token_usage_schema_ok",
         "frontend_restart_required",
         "updated",
         "rolled_back",
@@ -329,6 +331,9 @@ def _service_matches_current_app(service: dict, proxy: Optional[dict], expected_
     if not service.get("installed") or not service.get("loaded"):
         return False
     if expected_version and proxy.get("version") != expected_version:
+        return False
+    usage = proxy.get("usage") if isinstance(proxy.get("usage"), dict) else {}
+    if usage and usage.get("observed_columns_ok") is False:
         return False
     return True
 
@@ -483,6 +488,7 @@ def _post_update_validation(proxy: Optional[dict], expected_version: str) -> tup
         "manifest_error": integrity.get("error", ""),
         "token_usage_api_ok": False,
         "token_usage_events_api_ok": False,
+        "token_usage_schema_ok": False,
     }
     if not proxy:
         return False, details, f"proxy did not report expected version {expected_version or '-'}"
@@ -497,12 +503,16 @@ def _post_update_validation(proxy: Optional[dict], expected_version: str) -> tup
         return False, details, f"runtime_manifest_mismatch: {integrity.get('error') or integrity}"
     token_usage = fetch_json_url("http://127.0.0.1:8800/api/token-usage", timeout=3)
     token_events = fetch_json_url("http://127.0.0.1:8800/api/token-usage/events?limit=1", timeout=3)
+    usage_diag = proxy.get("usage") if isinstance(proxy.get("usage"), dict) else {}
     details["token_usage_api_ok"] = isinstance(token_usage, dict) and token_usage.get("history_available") is True
     details["token_usage_events_api_ok"] = isinstance(token_events, dict) and isinstance(token_events.get("events"), list)
+    details["token_usage_schema_ok"] = bool(usage_diag.get("observed_columns_ok"))
     if not details["token_usage_api_ok"]:
         return False, details, "token_usage_api_missing"
     if not details["token_usage_events_api_ok"]:
         return False, details, "token_usage_events_api_missing"
+    if not details["token_usage_schema_ok"]:
+        return False, details, "token_usage_schema_missing_observed_columns"
     return True, details, ""
 
 
@@ -586,6 +596,7 @@ def apply_update() -> dict:
         "manifest_error": validation.get("manifest_error", ""),
         "token_usage_api_ok": bool(validation.get("token_usage_api_ok")),
         "token_usage_events_api_ok": bool(validation.get("token_usage_events_api_ok")),
+        "token_usage_schema_ok": bool(validation.get("token_usage_schema_ok")),
         "frontend_restart_required": bool(updated and previous_version and previous_version != expected_version),
         "previous_version": previous_version,
         "expected_version": expected_version,

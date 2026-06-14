@@ -32,6 +32,8 @@ COUNTER_KEYS = (
     "cache_tokens",
     "cache_read_tokens",
     "cache_creation_tokens",
+    "cache_tokens_observed_requests",
+    "reasoning_tokens_observed_requests",
     "total_tokens",
     "requests",
     "unknown_requests",
@@ -110,6 +112,16 @@ def _first_number(data: dict, keys: tuple[str, ...]) -> Optional[int]:
     return None
 
 
+def _first_nested_number(data: dict, container_keys: tuple[str, ...], value_keys: tuple[str, ...]) -> Optional[int]:
+    for container_key in container_keys:
+        container = data.get(container_key)
+        if isinstance(container, dict):
+            number = _first_number(container, value_keys)
+            if number is not None:
+                return number
+    return None
+
+
 def _first_string(data: dict, keys: tuple[str, ...]) -> str:
     for key in keys:
         value = data.get(key)
@@ -139,6 +151,45 @@ def _usage_from_dict(data: dict, *, usage_container: bool = False) -> Optional[d
     cache_tokens = _first_number(data, CACHE_TOKEN_KEYS)
     cache_read_tokens = _first_number(data, CACHE_READ_TOKEN_KEYS)
     cache_creation_tokens = _first_number(data, CACHE_CREATION_TOKEN_KEYS)
+    nested_cached_tokens = _first_nested_number(
+        data,
+        (
+            "input_tokens_details",
+            "input_token_details",
+            "inputTokensDetails",
+            "inputTokenDetails",
+            "prompt_tokens_details",
+            "prompt_token_details",
+            "promptTokensDetails",
+            "promptTokenDetails",
+        ),
+        CACHED_TOKEN_KEYS + CACHE_TOKEN_KEYS,
+    )
+    nested_reasoning_tokens = _first_nested_number(
+        data,
+        (
+            "output_tokens_details",
+            "output_token_details",
+            "outputTokensDetails",
+            "outputTokenDetails",
+            "completion_tokens_details",
+            "completion_token_details",
+            "completionTokensDetails",
+            "completionTokenDetails",
+        ),
+        REASONING_TOKEN_KEYS,
+    )
+    if cached_tokens is None:
+        cached_tokens = nested_cached_tokens
+    if cache_tokens is None and nested_cached_tokens is not None:
+        cache_tokens = nested_cached_tokens
+    if reasoning_tokens is None:
+        reasoning_tokens = nested_reasoning_tokens
+    cache_tokens_observed = any(
+        value is not None
+        for value in (cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens, nested_cached_tokens)
+    )
+    reasoning_tokens_observed = reasoning_tokens is not None or nested_reasoning_tokens is not None
     total_tokens = _first_number(data, total_keys)
     usage = {
         "input_tokens": input_tokens or 0,
@@ -148,6 +199,8 @@ def _usage_from_dict(data: dict, *, usage_container: bool = False) -> Optional[d
         "cache_tokens": cache_tokens if cache_tokens is not None else (cached_tokens or 0),
         "cache_read_tokens": cache_read_tokens or 0,
         "cache_creation_tokens": cache_creation_tokens or 0,
+        "cache_tokens_observed": cache_tokens_observed,
+        "reasoning_tokens_observed": reasoning_tokens_observed,
         "requested_model": _first_string(data, ("requested_model", "requestedModel")),
         "resolved_model": _first_string(data, ("resolved_model", "resolvedModel", "model")),
         "reasoning_effort": _first_string(data, ("reasoning_effort", "reasoningEffort")),
@@ -243,11 +296,12 @@ def extract_usage_from_sse_bytes(body: bytes) -> Optional[dict]:
 def extract_usage_from_ws_payload(data: Any) -> Optional[dict]:
     if isinstance(data, bytes):
         try:
-            data = data.decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             return None
+        return extract_usage_from_sse_bytes(data) or extract_usage_from_text(text)
     if isinstance(data, str):
-        return extract_usage_from_text(data)
+        return extract_usage_from_sse_bytes(data.encode("utf-8")) or extract_usage_from_text(data)
     return None
 
 
@@ -339,6 +393,37 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def initialize_storage() -> dict:
+    """Create/migrate usage history storage and return diagnostics."""
+    with _connect() as conn:
+        return _storage_diagnostics(conn)
+
+
+def _storage_diagnostics(conn: sqlite3.Connection) -> dict:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(usage_events)").fetchall()}
+    required = {"cache_tokens_observed", "reasoning_tokens_observed"}
+    return {
+        "history_db": str(USAGE_HISTORY_DB),
+        "history_available": True,
+        "observed_columns_ok": required.issubset(columns),
+        "has_cache_tokens_observed": "cache_tokens_observed" in columns,
+        "has_reasoning_tokens_observed": "reasoning_tokens_observed" in columns,
+    }
+
+
+def diagnostics() -> dict:
+    try:
+        with _connect() as conn:
+            return _storage_diagnostics(conn)
+    except sqlite3.Error as e:
+        return {
+            "history_db": str(USAGE_HISTORY_DB),
+            "history_available": False,
+            "observed_columns_ok": False,
+            "error": str(e),
+        }
+
+
 def _ensure_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS usage_events (
@@ -361,6 +446,8 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
             cache_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0,
             cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_tokens_observed INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens_observed INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             known INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'proxy',
@@ -379,6 +466,8 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
         "cache_tokens": "INTEGER NOT NULL DEFAULT 0",
         "cache_read_tokens": "INTEGER NOT NULL DEFAULT 0",
         "cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cache_tokens_observed": "INTEGER NOT NULL DEFAULT 0",
+        "reasoning_tokens_observed": "INTEGER NOT NULL DEFAULT 0",
         "latency_ms": "REAL",
         "ttft_ms": "REAL",
         "requested_model": "TEXT",
@@ -482,6 +571,8 @@ def _counter_from_usage(usage: Optional[dict]) -> dict:
             counter[key] = int(usage.get(key) or 0)
         if not counter["cache_tokens"] and counter["cached_tokens"]:
             counter["cache_tokens"] = counter["cached_tokens"]
+        counter["cache_tokens_observed_requests"] = 1 if usage.get("cache_tokens_observed") else 0
+        counter["reasoning_tokens_observed_requests"] = 1 if usage.get("reasoning_tokens_observed") else 0
         counter["requests"] = 1
         if not counter["total_tokens"]:
             counter["total_tokens"] = (
@@ -558,6 +649,8 @@ def _insert_or_update_event(
         "cache_tokens": counter["cache_tokens"],
         "cache_read_tokens": counter["cache_read_tokens"],
         "cache_creation_tokens": counter["cache_creation_tokens"],
+        "cache_tokens_observed": 1 if counter["cache_tokens_observed_requests"] else 0,
+        "reasoning_tokens_observed": 1 if counter["reasoning_tokens_observed_requests"] else 0,
         "total_tokens": counter["total_tokens"],
         "known": 1 if known else 0,
         "source": source,
@@ -590,6 +683,8 @@ def _insert_or_update_event(
                 cache_tokens = :cache_tokens,
                 cache_read_tokens = :cache_read_tokens,
                 cache_creation_tokens = :cache_creation_tokens,
+                cache_tokens_observed = :cache_tokens_observed,
+                reasoning_tokens_observed = :reasoning_tokens_observed,
                 total_tokens = :total_tokens,
                 known = :known,
                 source = :source,
@@ -608,12 +703,14 @@ def _insert_or_update_event(
             event_hash, request_id, at, day, week, account, path, method, model,
             status, failed, input_tokens, output_tokens, reasoning_tokens,
             cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
+            cache_tokens_observed, reasoning_tokens_observed,
             total_tokens, known, source, latency_ms, ttft_ms, requested_model,
             resolved_model, reasoning_effort, service_tier, executor_type, created_at
         ) VALUES (
             :event_hash, :request_id, :at, :day, :week, :account, :path, :method, :model,
             :status, :failed, :input_tokens, :output_tokens, :reasoning_tokens,
             :cached_tokens, :cache_tokens, :cache_read_tokens, :cache_creation_tokens,
+            :cache_tokens_observed, :reasoning_tokens_observed,
             :total_tokens, :known, :source, :latency_ms, :ttft_ms, :requested_model,
             :resolved_model, :reasoning_effort, :service_tier, :executor_type, :created_at
         )
@@ -715,10 +812,35 @@ def _row_counter(row: sqlite3.Row) -> dict:
         "cache_tokens": int(row["cache_tokens"] or 0),
         "cache_read_tokens": int(row["cache_read_tokens"] or 0),
         "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+        "cache_tokens_observed_requests": int(row["cache_tokens_observed_requests"] or 0),
+        "reasoning_tokens_observed_requests": int(row["reasoning_tokens_observed_requests"] or 0),
         "total_tokens": int(row["total_tokens"] or 0),
         "requests": int(row["requests"] or 0),
         "unknown_requests": int(row["unknown_requests"] or 0),
     }
+
+
+def _value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _cache_value(row: Any) -> int:
+    cache_read = int(_value(row, "cache_read_tokens") or 0)
+    cache_creation = int(_value(row, "cache_creation_tokens") or 0)
+    if cache_read or cache_creation:
+        return cache_read + cache_creation
+    return max(int(_value(row, "cached_tokens") or 0), int(_value(row, "cache_tokens") or 0))
+
+
+def _capture_state(observed: bool, value: int) -> str:
+    if not observed:
+        return "missing"
+    return "observed_value" if int(value or 0) > 0 else "observed_zero"
 
 
 def _clamped_daily_days(value: Optional[int]) -> int:
@@ -757,6 +879,8 @@ def summary(
                        SUM(cache_tokens) AS cache_tokens,
                        SUM(cache_read_tokens) AS cache_read_tokens,
                        SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(cache_tokens_observed) AS cache_tokens_observed_requests,
+                       SUM(reasoning_tokens_observed) AS reasoning_tokens_observed_requests,
                        SUM(total_tokens) AS total_tokens,
                        COUNT(*) AS requests,
                        SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests
@@ -777,6 +901,8 @@ def summary(
                        SUM(cache_tokens) AS cache_tokens,
                        SUM(cache_read_tokens) AS cache_read_tokens,
                        SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(cache_tokens_observed) AS cache_tokens_observed_requests,
+                       SUM(reasoning_tokens_observed) AS reasoning_tokens_observed_requests,
                        SUM(total_tokens) AS total_tokens,
                        COUNT(*) AS requests,
                        SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests
@@ -796,6 +922,8 @@ def summary(
                        SUM(cache_tokens) AS cache_tokens,
                        SUM(cache_read_tokens) AS cache_read_tokens,
                        SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(cache_tokens_observed) AS cache_tokens_observed_requests,
+                       SUM(reasoning_tokens_observed) AS reasoning_tokens_observed_requests,
                        SUM(total_tokens) AS total_tokens,
                        COUNT(*) AS requests,
                        SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests,
@@ -838,6 +966,7 @@ def events(
                 SELECT event_hash, request_id, at, day, week, account, path, method, model,
                        status, failed, input_tokens, output_tokens, reasoning_tokens,
                        cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
+                       cache_tokens_observed, reasoning_tokens_observed,
                        total_tokens, known, source, latency_ms, ttft_ms, requested_model,
                        resolved_model, reasoning_effort, service_tier, executor_type
                 FROM usage_events
@@ -869,6 +998,16 @@ def events(
                 "cache_tokens": int(row["cache_tokens"] or 0),
                 "cache_read_tokens": int(row["cache_read_tokens"] or 0),
                 "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+                "cache_tokens_observed": bool(row["cache_tokens_observed"]),
+                "reasoning_tokens_observed": bool(row["reasoning_tokens_observed"]),
+                "cache_capture_state": _capture_state(
+                    bool(row["cache_tokens_observed"]),
+                    _cache_value(row),
+                ),
+                "reasoning_capture_state": _capture_state(
+                    bool(row["reasoning_tokens_observed"]),
+                    int(row["reasoning_tokens"] or 0),
+                ),
                 "total_tokens": int(row["total_tokens"] or 0),
                 "latency_ms": row["latency_ms"],
                 "ttft_ms": row["ttft_ms"],

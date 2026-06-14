@@ -67,6 +67,8 @@ from usage_stats import (
     compatible_cached_tokens,
     extract_usage_from_json,
     extract_usage_from_sse_bytes,
+    extract_usage_from_ws_payload,
+    initialize_storage as initialize_usage_storage,
     record_request_usage,
 )
 
@@ -334,6 +336,8 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(usage["input_tokens"], 12)
         self.assertEqual(usage["output_tokens"], 8)
         self.assertEqual(usage["total_tokens"], 20)
+        self.assertFalse(usage["cache_tokens_observed"])
+        self.assertFalse(usage["reasoning_tokens_observed"])
 
     def test_extract_usage_accepts_token_usage_aliases(self):
         payload = {
@@ -370,6 +374,74 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(usage["cache_read_tokens"], 7)
         self.assertEqual(usage["cache_creation_tokens"], 11)
 
+    def test_extract_usage_reads_nested_token_details(self):
+        payload = {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 99,
+                "input_tokens_details": {
+                    "cached_tokens": 7,
+                },
+                "output_tokens_details": {
+                    "reasoning_tokens": 3,
+                },
+            }
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["total_tokens"], 99)
+        self.assertEqual(usage["cached_tokens"], 7)
+        self.assertEqual(usage["cache_tokens"], 7)
+        self.assertEqual(usage["reasoning_tokens"], 3)
+        self.assertTrue(usage["cache_tokens_observed"])
+        self.assertTrue(usage["reasoning_tokens_observed"])
+
+    def test_extract_usage_reads_camel_case_nested_token_details(self):
+        payload = {
+            "response": {
+                "usage": {
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "totalTokens": 99,
+                    "inputTokensDetails": {
+                        "cachedTokens": 7,
+                    },
+                    "outputTokensDetails": {
+                        "reasoningTokens": 3,
+                    },
+                }
+            }
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["total_tokens"], 99)
+        self.assertEqual(usage["cached_tokens"], 7)
+        self.assertEqual(usage["cache_tokens"], 7)
+        self.assertEqual(usage["reasoning_tokens"], 3)
+        self.assertTrue(usage["cache_tokens_observed"])
+        self.assertTrue(usage["reasoning_tokens_observed"])
+
+    def test_extract_usage_observes_explicit_zero_token_details(self):
+        payload = {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+            }
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["cached_tokens"], 0)
+        self.assertEqual(usage["reasoning_tokens"], 0)
+        self.assertTrue(usage["cache_tokens_observed"])
+        self.assertTrue(usage["reasoning_tokens_observed"])
+
     def test_extract_usage_computes_total_without_double_counting_cache(self):
         payload = {
             "usage": {
@@ -396,6 +468,23 @@ class UsageStatsTests(unittest.TestCase):
         usage = extract_usage_from_sse_bytes(body)
 
         self.assertEqual(usage["total_tokens"], 15)
+
+    def test_extract_usage_from_ws_payload_accepts_sse_text_frame(self):
+        payload = (
+            'event: response.completed\n'
+            'data: {"response":{"usage":{"input_tokens":10,"output_tokens":2,'
+            '"total_tokens":12,"input_token_details":{"cached_tokens":7},'
+            '"output_token_details":{"reasoning_tokens":3}}}}\n\n'
+        )
+
+        usage = extract_usage_from_ws_payload(payload)
+
+        self.assertEqual(usage["total_tokens"], 12)
+        self.assertEqual(usage["cached_tokens"], 7)
+        self.assertEqual(usage["cache_tokens"], 7)
+        self.assertEqual(usage["reasoning_tokens"], 3)
+        self.assertTrue(usage["cache_tokens_observed"])
+        self.assertTrue(usage["reasoning_tokens_observed"])
 
     def test_record_request_usage_summarizes_daily_weekly_and_dedupes(self):
         stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
@@ -462,6 +551,62 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["known"])
         self.assertEqual(rows[0]["model"], "gpt-5.3-codex")
+
+    def test_record_request_usage_summarizes_observed_token_details(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-unobserved",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            )
+            record_request_usage(
+                request_id="req-observed-zero",
+                account="a",
+                path="/v1/responses",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                    "cached_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_tokens_observed": True,
+                    "reasoning_tokens_observed": True,
+                },
+            )
+            record_request_usage(
+                request_id="req-observed-cache",
+                account="a",
+                path="/v1/responses",
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 99,
+                    "cached_tokens": 7,
+                    "cache_tokens": 7,
+                    "reasoning_tokens": 3,
+                    "cache_tokens_observed": True,
+                    "reasoning_tokens_observed": True,
+                },
+            )
+            summary = usage_stats.summary()
+            rows = usage_stats.events(limit=10)["events"]
+
+        self.assertEqual(summary["total"]["requests"], 3)
+        self.assertEqual(summary["total"]["cache_tokens_observed_requests"], 2)
+        self.assertEqual(summary["total"]["reasoning_tokens_observed_requests"], 2)
+        self.assertTrue(any(day["cache_tokens_observed_requests"] == 2 for day in summary["daily"]))
+        observed = {row["request_id"]: row for row in rows}
+        self.assertFalse(observed["req-unobserved"]["cache_tokens_observed"])
+        self.assertTrue(observed["req-observed-zero"]["cache_tokens_observed"])
+        self.assertTrue(observed["req-observed-cache"]["reasoning_tokens_observed"])
+        self.assertEqual(observed["req-unobserved"]["cache_capture_state"], "missing")
+        self.assertEqual(observed["req-observed-zero"]["cache_capture_state"], "observed_zero")
+        self.assertEqual(observed["req-observed-cache"]["cache_capture_state"], "observed_value")
+        self.assertEqual(observed["req-observed-cache"]["reasoning_capture_state"], "observed_value")
 
     def test_legacy_usage_json_imports_idempotently(self):
         root = Path(tempfile.mkdtemp())
@@ -633,10 +778,13 @@ class UsageStatsTests(unittest.TestCase):
                 path="/v1/responses",
                 usage={"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 3},
             )
+            diag = initialize_usage_storage()
             row = usage_stats.events(limit=1)["events"][0]
 
         self.assertEqual(row["cache_read_tokens"], 3)
         self.assertEqual(row["total_tokens"], 6)
+        self.assertTrue(diag["observed_columns_ok"])
+        self.assertEqual(row["cache_capture_state"], "missing")
 
 
 class ControlActionsTests(unittest.TestCase):
@@ -968,6 +1116,7 @@ class ControlActionsTests(unittest.TestCase):
                     "version": "0.6.1",
                     "active_accounts": 1,
                     "total_accounts": 1,
+                    "usage": {"observed_columns_ok": True},
                 }), \
                 mock.patch("control_actions.fetch_json_url", side_effect=[
                     {"history_available": True},

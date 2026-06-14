@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.5 - 2026-06-14
+
+- Aligned the macOS control app sidebar navigation icons, labels, and titlebar traffic-light buttons to a consistent visual axis.
+- Redesigned the overview quota card around separate pooled 5h and 7d quota rings with labels like `322% / 400%`.
+- Expanded macOS and Web token usage chart details with input, output, reasoning, and cache token fields.
+- Added cache/reasoning token capture-state diagnostics so uncaptured values display as unknown instead of zero.
+- Improved WebSocket/SSE usage extraction for token detail fields.
+- Changed the macOS token overview request count to show known requests while keeping the existing label.
+
 ## v0.6.4 - 2026-06-14
 
 - Added a first-success guide in the macOS app that walks through backend startup, Codex detection, account readiness, proxy enablement, opening Codex, and confirming model traffic is pooled.

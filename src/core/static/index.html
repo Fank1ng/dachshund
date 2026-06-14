@@ -265,12 +265,23 @@ function heatmapCells(rows, maxValue) {
 }
 
 function usageTip(row) {
+  const requests = Number(row.requests) || 0;
+  const unknown = Number(row.unknown_requests) || 0;
+  const known = Math.max(0, requests - unknown);
+  const cacheRead = Number(row.cache_read_tokens) || 0;
+  const cacheCreate = Number(row.cache_creation_tokens) || 0;
+  const cache = (cacheRead || cacheCreate)
+    ? cacheRead + cacheCreate
+    : Math.max(Number(row.cached_tokens) || 0, Number(row.cache_tokens) || 0);
+  const cacheObserved = Boolean(row.cache_tokens_observed) || (Number(row.cache_tokens_observed_requests) || 0) > 0;
+  const reasoningObserved = Boolean(row.reasoning_tokens_observed) || (Number(row.reasoning_tokens_observed_requests) || 0) > 0;
   return [
     row.date || row.week_start || '-',
-    `Token: ${formatTokenCount(row.total_tokens || 0)}`,
-    `请求: ${row.requests || 0}`,
-    `输入/输出: ${formatTokenCount(row.input_tokens || 0)} / ${formatTokenCount(row.output_tokens || 0)}`,
-    `未知 usage: ${row.unknown_requests || 0}`
+    `总计 ${formatExactTokenCount(row.total_tokens || 0)} tokens`,
+    `输入 ${formatExactTokenCount(row.input_tokens || 0)} · 输出 ${formatExactTokenCount(row.output_tokens || 0)}`,
+    `缓存 ${cacheObserved ? formatExactTokenCount(cache) : '-'}`,
+    `推理 ${reasoningObserved ? formatExactTokenCount(row.reasoning_tokens || 0) : '-'}`,
+    `请求 ${requests} · 已知 ${known} · 未知 ${unknown}`
   ].join('\n');
 }
 
@@ -401,6 +412,10 @@ function formatTokenCount(value) {
   if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
   return String(Math.round(n));
+}
+
+function formatExactTokenCount(value) {
+  return String(Math.round(Number(value) || 0));
 }
 
 refreshAll();

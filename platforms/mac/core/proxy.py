@@ -31,7 +31,12 @@ from login_manager import LoginManager, find_codex_cli
 from proxy_core import handle as proxy_handle
 from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
-from usage_stats import events as usage_events, summary as usage_summary
+from usage_stats import (
+    diagnostics as usage_diagnostics,
+    events as usage_events,
+    initialize_storage as initialize_usage_storage,
+    summary as usage_summary,
+)
 from version import APP_VERSION
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
@@ -449,6 +454,7 @@ async def api_status(request: web.Request) -> web.Response:
         "bundle_version": service.get("bundle_version"),
         "runtime_version": service.get("runtime_version"),
         "proxy_version": APP_VERSION,
+        "usage": usage_diagnostics(),
         "manifest_ok": service.get("manifest_ok"),
         "manifest_error": service.get("manifest_error"),
         "expected_version": service.get("expected_version"),
@@ -520,6 +526,7 @@ async def api_health(request: web.Request) -> web.Response:
         "port": get("port"),
         "total_accounts": len(pool.accounts),
         "active_accounts": pool.active_count(),
+        "usage": usage_diagnostics(),
     })
 
 
@@ -720,6 +727,11 @@ def create_app() -> web.Application:
 
 
 async def on_startup(app: web.Application) -> None:
+    usage_diag = initialize_usage_storage()
+    if usage_diag.get("observed_columns_ok"):
+        logger.info("usage storage ready: %s", usage_diag)
+    else:
+        logger.warning("usage storage observed-column migration incomplete: %s", usage_diag)
     app["upstream_session"] = aiohttp.ClientSession(auto_decompress=False)
     app["quota_task"] = None
     await _sync_quota_task(app)

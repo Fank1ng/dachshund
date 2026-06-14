@@ -9,19 +9,19 @@
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\platforms\windows\build_windows.ps1 -Version 0.5.1
+.\platforms\windows\build_windows.ps1 -Version 0.6.5
 ```
 
 脚本会生成：
 
 - `dist\windows\Codex Proxy Control.exe`
 - `dist\windows\CodexProxyService.exe`
-- `dist\CodexProxyControlSetup-0.5.1-win-x64.exe`（已安装 Inno Setup 时）
+- `dist\CodexProxyControlSetup-0.6.5-win-x64.exe`（已安装 Inno Setup 时）
 
 如果只想生成便携文件：
 
 ```powershell
-.\platforms\windows\build_windows.ps1 -Version 0.5.1 -SkipInstaller
+.\platforms\windows\build_windows.ps1 -Version 0.6.5 -SkipInstaller
 ```
 
 ## 安装与运行
@@ -29,7 +29,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 已发布的 Windows 安装包在 GitHub Release:
 
 ```text
-https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.5.1
+https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.6.5
 ```
 
 安装包默认安装到：
@@ -65,7 +65,7 @@ https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.5.1
 下载标记：
 
 ```powershell
-Unblock-File .\dist\CodexProxyControlSetup-0.5.1-win-x64.exe
+Unblock-File .\dist\CodexProxyControlSetup-0.6.5-win-x64.exe
 ```
 
 如果是 Smart App Control 直接阻止，Windows 通常不会提供单次放行按钮。
