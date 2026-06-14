@@ -38,6 +38,7 @@ KEY_LABELS = {
     "legacy_running": "旧后台正在运行",
     "enabled": "已启用",
     "mode": "模式",
+    "product_mode": "运行模式",
     "running": "代理在线",
     "active_accounts": "可用账号数",
     "total_accounts": "账号总数",
@@ -217,6 +218,7 @@ def compact(data: dict) -> str:
         "legacy_running",
         "enabled",
         "mode",
+        "product_mode",
         "running",
         "active_accounts",
         "total_accounts",
@@ -317,6 +319,9 @@ def with_product_status(data: dict) -> dict:
 def _service_matches_current_app(service: dict, proxy: Optional[dict], expected_version: str) -> bool:
     if not proxy:
         return False
+    manifest = service.get("manifest") if isinstance(service.get("manifest"), dict) else {}
+    if service.get("manifest_ok") is False or manifest.get("ok") is False:
+        return False
     if service.get("needs_repair") or service.get("version_mismatch"):
         return False
     if service.get("migration_required") or service.get("legacy_running") or service.get("legacy_loaded"):
@@ -343,6 +348,9 @@ def repair() -> dict:
             "version_mismatch": service.get("version_mismatch"),
             "migration_required": service.get("migration_required"),
             "legacy_running": service.get("legacy_running"),
+            "manifest_ok": service.get("manifest_ok"),
+            "manifest_error": service.get("manifest_error"),
+            "manifest": service.get("manifest"),
             "enabled": codex.get("enabled"),
             "mode": codex.get("mode"),
             "running": True,
@@ -368,6 +376,9 @@ def repair() -> dict:
             "version_mismatch": service.get("version_mismatch"),
             "migration_required": service.get("migration_required"),
             "legacy_running": service.get("legacy_running"),
+            "manifest_ok": service.get("manifest_ok"),
+            "manifest_error": service.get("manifest_error"),
+            "manifest": service.get("manifest"),
             "enabled": codex.get("enabled"),
             "mode": codex.get("mode"),
             "running": bool(proxy_before),
@@ -396,6 +407,9 @@ def repair() -> dict:
         "version_mismatch": service.get("version_mismatch"),
         "migration_required": service.get("migration_required"),
         "legacy_running": service.get("legacy_running"),
+        "manifest_ok": service.get("manifest_ok"),
+        "manifest_error": service.get("manifest_error"),
+        "manifest": service.get("manifest"),
         "enabled": codex.get("enabled"),
         "mode": codex.get("mode"),
         "running": bool(proxy),
@@ -965,6 +979,7 @@ def status() -> dict:
         "enabled": codex.get("enabled"),
         "mode": codex.get("mode"),
         "strategy": cfg.get("rotation_strategy"),
+        "product_mode": cfg.get("product_mode"),
         "codex_stream_mode": cfg.get("codex_stream_mode"),
         "codex_hybrid_probe_seconds": cfg.get("codex_hybrid_probe_seconds"),
         "codex_hybrid_probe_bytes": cfg.get("codex_hybrid_probe_bytes"),

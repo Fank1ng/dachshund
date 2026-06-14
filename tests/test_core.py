@@ -121,6 +121,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["quota_weight_5h"], 0.5)
         self.assertEqual(cfg["quota_weight_7d"], 0.5)
 
+    def test_validate_defaults_to_most_available_strategy(self):
+        cfg = validate({})
+        self.assertEqual(cfg["rotation_strategy"], "most_available")
+        self.assertEqual(cfg["product_mode"], "standard")
+
+    def test_validate_preserves_legacy_round_robin_strategy(self):
+        cfg = validate({"rotation_strategy": "round_robin"})
+        self.assertEqual(cfg["rotation_strategy"], "round_robin")
+
+    def test_validate_accepts_product_modes(self):
+        self.assertEqual(validate({"product_mode": "compatibility"})["product_mode"], "compatibility")
+        self.assertEqual(validate({"product_mode": "diagnostic"})["product_mode"], "diagnostic")
+
+    def test_validate_rejects_unknown_product_mode(self):
+        with self.assertRaises(ConfigError):
+            validate({"product_mode": "turbo"})
+
     def test_validate_migrates_implicit_hybrid_to_realtime(self):
         cfg = validate({"codex_stream_mode": "hybrid"})
         self.assertEqual(cfg["codex_stream_mode"], "realtime")
@@ -817,6 +834,67 @@ class ControlActionsTests(unittest.TestCase):
         self.assertFalse(result["updated"])
         self.assertEqual(result["version"], "0.6.0")
         install.assert_not_called()
+
+    def test_repair_syncs_runtime_when_manifest_differs_even_if_versions_match(self):
+        service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "version_mismatch": False,
+            "migration_required": False,
+            "legacy_running": False,
+            "expected_version": "0.6.0",
+            "running_version": "0.6.0",
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+            "manifest_ok": False,
+            "manifest": {
+                "ok": False,
+                "bundle_version": "0.6.0",
+                "runtime_version": "0.6.0",
+                "version_match": True,
+                "changed": ["config.py", "proxy.py"],
+            },
+        }
+        synced_service = {
+            **service,
+            "manifest_ok": True,
+            "manifest": {
+                "ok": True,
+                "bundle_version": "0.6.0",
+                "runtime_version": "0.6.0",
+                "version_match": True,
+                "changed": [],
+            },
+            "restart_required": False,
+        }
+        with mock.patch("control_actions.proxy_status", return_value={
+            "running": True,
+            "version": "0.6.0",
+            "active_accounts": 2,
+            "total_accounts": 2,
+        }), mock.patch("control_actions.service_manager.status", return_value=service), \
+                mock.patch("control_actions.service_manager.install", return_value=synced_service) as install, \
+                mock.patch("control_actions.service_manager.restart", return_value=True), \
+                mock.patch("control_actions.wait_for_proxy", return_value={
+                    "running": True,
+                    "version": "0.6.0",
+                    "active_accounts": 2,
+                    "total_accounts": 2,
+                }), \
+                mock.patch("control_actions.codex_config.ensure_enabled", return_value={
+                    "enabled": True,
+                    "mode": "codex_pool_provider",
+                }), \
+                mock.patch("control_actions.codex_dependency_status", return_value={}), \
+                mock.patch("control_actions.runtime_status", return_value={}):
+            result = control_actions.repair()
+
+        self.assertEqual(result["action"], "started_or_repaired")
+        self.assertFalse(result["updated"])
+        self.assertTrue(result["restart_started"])
+        self.assertTrue(result["manifest_ok"])
+        install.assert_called_once_with(sync=True)
 
     def test_apply_update_returns_busy_when_lock_exists(self):
         with mock.patch("control_actions._acquire_update_lock", return_value=None):
@@ -2135,13 +2213,14 @@ class ProxyCoreTests(unittest.TestCase):
         upstream_ws = _FakeWebSocket()
         session = _FakeWSSession([handshake_429, upstream_ws])
 
-        connected, attempts, failure = asyncio.run(_connect_codex_upstream_websocket(
-            _FakeRequest(headers={"Sec-WebSocket-Protocol": "chatgpt"}),
-            pool,
-            session,
-            "rid-ws",
-            "/v1/responses",
-        ))
+        with mock.patch("account_manager.get", side_effect=lambda key: "round_robin" if key == "rotation_strategy" else None):
+            connected, attempts, failure = asyncio.run(_connect_codex_upstream_websocket(
+                _FakeRequest(headers={"Sec-WebSocket-Protocol": "chatgpt"}),
+                pool,
+                session,
+                "rid-ws",
+                "/v1/responses",
+            ))
 
         self.assertIsNone(failure)
         self.assertEqual(connected.account.name, "b")
@@ -2273,7 +2352,8 @@ class ProxyCoreTests(unittest.TestCase):
             replay_frames=[("text", "response.create")],
         )
 
-        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+        with mock.patch("account_manager.get", side_effect=lambda key: "round_robin" if key == "rotation_strategy" else None), \
+                mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
                 mock.patch("proxy_core._relay_websocket_pair", side_effect=[first, second]) as relay:
             result = asyncio.run(_handle_codex_websocket(
                 _FakeRequest(),
@@ -2314,7 +2394,8 @@ class ProxyCoreTests(unittest.TestCase):
             replay_frames=[("text", "response.create")],
         )
 
-        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+        with mock.patch("account_manager.get", side_effect=lambda key: "round_robin" if key == "rotation_strategy" else None), \
+                mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
                 mock.patch("proxy_core._relay_websocket_pair", return_value=partial):
             result = asyncio.run(_handle_codex_websocket(
                 _FakeRequest(),

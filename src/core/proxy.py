@@ -474,6 +474,7 @@ async def api_status(request: web.Request) -> web.Response:
         "running": True,
         "port": get("port"),
         "strategy": get("rotation_strategy"),
+        "product_mode": get("product_mode"),
         "stats": pool.stats,
         "last_request": pool.recent_requests[0] if pool.recent_requests else None,
         "recent_requests": recent_requests,
@@ -481,6 +482,7 @@ async def api_status(request: web.Request) -> web.Response:
         "quota_tracker": quota_status(request.app.get("quota_task")),
         "config": {
             "codex_stream_mode": get("codex_stream_mode"),
+            "product_mode": get("product_mode"),
             "codex_stream_mode_user_set": get("codex_stream_mode_user_set"),
             "codex_hybrid_probe_seconds": get("codex_hybrid_probe_seconds"),
             "codex_hybrid_probe_bytes": get("codex_hybrid_probe_bytes"),

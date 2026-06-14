@@ -18,7 +18,8 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 DEFAULTS = {
     "port": 8800,
     "rate_limit_cooldown": 60,
-    "rotation_strategy": "round_robin",
+    "rotation_strategy": "most_available",
+    "product_mode": "standard",
     "max_retries": 10,
     "quota_refresh_interval": 300,
     "quota_tracker_enabled": True,
@@ -123,6 +124,7 @@ def validate(cfg: dict) -> dict:
         "port": int_range("port", 1024, 65535),
         "rate_limit_cooldown": int_range("rate_limit_cooldown", 1, 3600),
         "rotation_strategy": str(merged.get("rotation_strategy", DEFAULTS["rotation_strategy"])),
+        "product_mode": str(merged.get("product_mode", DEFAULTS["product_mode"])).lower(),
         "max_retries": int_range("max_retries", 1, 50),
         "quota_refresh_interval": int_range("quota_refresh_interval", 30, 86400),
         "quota_tracker_enabled": bool_value("quota_tracker_enabled"),
@@ -155,6 +157,9 @@ def validate(cfg: dict) -> dict:
 
     if normalized["rotation_strategy"] not in {"round_robin", "most_available"}:
         errors.append("rotation_strategy must be round_robin or most_available")
+
+    if normalized["product_mode"] not in {"standard", "compatibility", "diagnostic"}:
+        errors.append("product_mode must be standard, compatibility, or diagnostic")
 
     if normalized["codex_stream_mode"] not in {"realtime", "buffered", "hybrid"}:
         errors.append("codex_stream_mode must be realtime, buffered, or hybrid")

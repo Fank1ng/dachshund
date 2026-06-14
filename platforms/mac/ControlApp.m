@@ -212,6 +212,7 @@ static NSColor *CPSidebarBorderColor(void) {
 @property(nonatomic, copy) NSString *logPath;
 @property(nonatomic, strong) NSTimer *refreshTimer;
 @property(nonatomic, assign) BOOL busy;
+@property(nonatomic, assign) BOOL refreshInFlight;
 @property(nonatomic, assign) BOOL compactInspector;
 @property(nonatomic, assign) NSInteger tokenUsageMode;
 @end
@@ -631,7 +632,7 @@ static NSColor *CPSidebarBorderColor(void) {
     [self startRuntimeInitialization];
     self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:15
                                                          target:self
-                                                       selector:@selector(refreshSnapshots:)
+                                                       selector:@selector(autoRefreshSnapshots:)
                                                        userInfo:nil
                                                         repeats:YES];
 }
@@ -793,7 +794,6 @@ static NSColor *CPSidebarBorderColor(void) {
     self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复/更新后台" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
-    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Web" symbol:@"safari" selector:@selector(openWebAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
     [header addSubview:self.toolbarStack];
     [NSLayoutConstraint activateConstraints:@[
@@ -850,9 +850,6 @@ static NSColor *CPSidebarBorderColor(void) {
 }
 
 - (void)renderOverviewSection {
-    if ([self hasVersionMismatch]) {
-        [self.contentStack addArrangedSubview:[self constrainedContentView:[self versionMismatchCard] width:450]];
-    }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self totalQuotaCard] width:450]];
     if ([self shouldShowTokenHistoryWarning]) {
         [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenHistoryWarningCard] width:450]];
@@ -868,7 +865,7 @@ static NSColor *CPSidebarBorderColor(void) {
     }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self metricsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountsTableCardWithHeight:176]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:110 compact:YES]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:126 compact:YES]]];
 }
 
 - (void)renderAccountsSection {
@@ -877,7 +874,7 @@ static NSColor *CPSidebarBorderColor(void) {
     }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self metricsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountsTableCardWithHeight:176]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:110 compact:YES]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:126 compact:YES]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountQuickActionsCard]]];
 }
 
@@ -887,10 +884,16 @@ static NSColor *CPSidebarBorderColor(void) {
 }
 
 - (void)renderConfigSection {
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self updateDiagnosticsCard]]];
+    if ([self shouldShowSetupCard]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self setupChecklistCard] width:450]];
+    }
+    if ([self hasRuntimeManifestMismatch] || [self hasVersionMismatch]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self runtimeSyncCard] width:450]];
+    }
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self proxyConfirmationCard] width:450]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self configCardsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self strategyCard]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self streamModeCard]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self updateDiagnosticsCard]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self pathsCard]]];
 }
 
@@ -928,7 +931,57 @@ static NSColor *CPSidebarBorderColor(void) {
     if (!CPBool(self.statusSnapshot[@"installed"]) || !CPBool(self.statusSnapshot[@"loaded"])) {
         return YES;
     }
-    return !CPBool(self.statusSnapshot[@"enabled"]);
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        return YES;
+    }
+    if (CPDouble(self.statusSnapshot[@"active_accounts"]) <= 0) {
+        return YES;
+    }
+    return ![self proxyTrafficConfirmed];
+}
+
+- (NSDictionary *)runtimeManifestSnapshot {
+    return CPDict(self.statusSnapshot[@"manifest"]);
+}
+
+- (BOOL)hasRuntimeManifestMismatch {
+    if (!self.statusSnapshot.count) {
+        return NO;
+    }
+    if (self.statusSnapshot[@"manifest_ok"] && !CPBool(self.statusSnapshot[@"manifest_ok"])) {
+        return YES;
+    }
+    NSDictionary *manifest = [self runtimeManifestSnapshot];
+    return manifest.count > 0 && manifest[@"ok"] && !CPBool(manifest[@"ok"]);
+}
+
+- (NSString *)runtimeManifestFilesSummary {
+    NSDictionary *manifest = [self runtimeManifestSnapshot];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSDictionary<NSString *, NSString *> *titles = @{
+        @"changed": @"变更文件",
+        @"missing": @"缺失文件",
+        @"extra": @"多余文件",
+        @"expected_missing": @"内置缺失",
+        @"observed_missing": @"运行缺失",
+    };
+    for (NSString *key in @[@"changed", @"missing", @"extra", @"expected_missing", @"observed_missing"]) {
+        NSArray *items = CPArray(manifest[key]);
+        if (items.count == 0) {
+            continue;
+        }
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (id item in items) {
+            NSString *name = CPString(item);
+            if (name.length) {
+                [names addObject:name];
+            }
+        }
+        if (names.count) {
+            [parts addObject:[NSString stringWithFormat:@"%@：%@", titles[key], [names componentsJoinedByString:@", "]]];
+        }
+    }
+    return [parts componentsJoinedByString:@"；"];
 }
 
 - (BOOL)hasVersionMismatch {
@@ -952,8 +1005,7 @@ static NSColor *CPSidebarBorderColor(void) {
     if (bundle.length && proxyVersion.length && ![bundle isEqualToString:proxyVersion]) {
         knownMismatch = YES;
     }
-    BOOL manifestKnownFailed = self.statusSnapshot[@"manifest_ok"] && !CPBool(self.statusSnapshot[@"manifest_ok"]);
-    return knownMismatch || manifestKnownFailed || CPBool(self.statusSnapshot[@"version_mismatch"]);
+    return knownMismatch || CPBool(self.statusSnapshot[@"version_mismatch"]);
 }
 
 - (BOOL)shouldShowTokenHistoryWarning {
@@ -980,7 +1032,9 @@ static NSColor *CPSidebarBorderColor(void) {
     return card;
 }
 
-- (NSView *)versionMismatchCard {
+- (NSView *)runtimeSyncCard {
+    BOOL versionMismatch = [self hasVersionMismatch];
+    BOOL manifestMismatch = [self hasRuntimeManifestMismatch] && !versionMismatch;
     NSView *card = [self cardViewWithBackground:[[NSColor systemOrangeColor] colorWithAlphaComponent:0.12]];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     NSStackView *stack = [[NSStackView alloc] init];
@@ -989,16 +1043,245 @@ static NSColor *CPSidebarBorderColor(void) {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
-    [stack addArrangedSubview:[self labelWithText:@"版本不同步" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.systemOrangeColor]];
-    [stack addArrangedSubview:[self emptyStateLabel:@"后台或运行目录已经更新，但当前前台窗口可能仍是旧版本。请退出并重新打开小腊肠。"]];
+    [stack addArrangedSubview:[self labelWithText:manifestMismatch ? @"运行文件未同步" : @"版本不同步"
+                                             font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold]
+                                            color:NSColor.systemOrangeColor]];
+    NSString *message = manifestMismatch
+        ? @"运行目录中的文件与当前 App 内置文件不一致。点击同步运行文件后，小腊肠会更新后台运行文件并重启代理。"
+        : @"后台或运行目录版本与当前 App 不一致。请退出并重新打开小腊肠，或点击启动/修复同步后台。";
+    [stack addArrangedSubview:[self emptyStateLabel:message]];
+    NSString *fileSummary = [self runtimeManifestFilesSummary];
+    if (manifestMismatch && fileSummary.length) {
+        [stack addArrangedSubview:[self emptyStateLabel:fileSummary]];
+    }
     [stack addArrangedSubview:[self versionDiagnosticsGridCompact:YES]];
+    NSStackView *buttons = [[NSStackView alloc] init];
+    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    buttons.spacing = 6;
+    [buttons addArrangedSubview:[self actionButtonWithTitle:manifestMismatch ? @"同步运行文件" : @"启动/修复"
+                                                     symbol:@"arrow.triangle.2.circlepath"
+                                                   selector:@selector(repairAction:)
+                                                    primary:YES]];
+    NSView *flex = [[NSView alloc] init];
+    [buttons addArrangedSubview:flex];
+    [stack addArrangedSubview:buttons];
+    return card;
+}
+
+- (BOOL)serviceReady {
+    return CPBool(self.statusSnapshot[@"installed"]) && CPBool(self.statusSnapshot[@"loaded"])
+        && !CPBool(self.statusSnapshot[@"needs_repair"])
+        && !CPBool(self.statusSnapshot[@"version_mismatch"])
+        && !CPBool(self.statusSnapshot[@"migration_required"]);
+}
+
+- (BOOL)hasUsableAccount {
+    return CPDouble(self.statusSnapshot[@"active_accounts"]) > 0;
+}
+
+- (BOOL)hasAnyAccount {
+    return CPDouble(self.statusSnapshot[@"total_accounts"]) > 0 || self.accounts.count > 0;
+}
+
+- (BOOL)isModelProxyPath:(NSString *)path {
+    return [path hasPrefix:@"/v1/responses"]
+        || [path hasPrefix:@"/backend-api/codex/responses"];
+}
+
+- (BOOL)isBackgroundOnlyPath:(NSString *)path {
+    return [path hasPrefix:@"/v1/models"]
+        || [path hasPrefix:@"/backend-api/wham/"]
+        || [path hasPrefix:@"/backend-api/connectors/"]
+        || [path hasPrefix:@"/backend-api/plugins/"]
+        || [path hasPrefix:@"/backend-api/codex/analytics-events"]
+        || [path hasPrefix:@"/backend-api/codex/usage"];
+}
+
+- (BOOL)proxyTrafficConfirmed {
+    NSDictionary *modelProxy = CPDict(self.statusSnapshot[@"model_proxy"]);
+    if (CPBool(modelProxy[@"observed"])) {
+        return YES;
+    }
+    for (NSDictionary *row in CPArray(self.statusSnapshot[@"recent_requests"])) {
+        NSString *account = CPString(row[@"account"]);
+        NSString *path = CPString(row[@"path"]);
+        if (![account isEqualToString:@"local"] && [self isModelProxyPath:path]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (BOOL)hasOnlyBackgroundTraffic {
+    BOOL sawBackground = NO;
+    for (NSDictionary *row in CPArray(self.statusSnapshot[@"recent_requests"])) {
+        NSString *path = CPString(row[@"path"]);
+        if ([self isModelProxyPath:path]) {
+            return NO;
+        }
+        if ([self isBackgroundOnlyPath:path]) {
+            sawBackground = YES;
+        }
+    }
+    return sawBackground;
+}
+
+- (NSString *)proxyConfirmationTitle {
+    if ([self proxyTrafficConfirmed]) {
+        return @"已确认走代理";
+    }
+    if (!CPBool(self.statusSnapshot[@"running"])) {
+        return @"代理未确认";
+    }
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        return @"Codex 仍是直连";
+    }
+    if (![self hasUsableAccount]) {
+        return @"等待可用账号";
+    }
+    if ([self hasOnlyBackgroundTraffic]) {
+        return @"等待真实对话";
+    }
+    return @"等待确认";
+}
+
+- (NSString *)proxyConfirmationDetail {
+    NSDictionary *modelProxy = CPDict(self.statusSnapshot[@"model_proxy"]);
+    if ([self proxyTrafficConfirmed]) {
+        NSArray *recent = CPArray(modelProxy[@"recent_model_requests"]);
+        NSDictionary *row = recent.count ? CPDict(recent.firstObject) : CPDict(CPArray(self.statusSnapshot[@"recent_requests"]).firstObject);
+        NSString *account = CPDisplayString(row[@"account"]);
+        NSString *path = CPDisplayString(row[@"path"]);
+        return [NSString stringWithFormat:@"最近模型请求已由账号 %@ 处理：%@", account, path];
+    }
+    if (!CPBool(self.statusSnapshot[@"running"])) {
+        return @"点击“启动/修复/更新后台”，让本机代理先在线。";
+    }
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        return @"点击“启用代理”，让 Codex 使用本机账号池。";
+    }
+    if (![self hasUsableAccount]) {
+        return @"请添加、导入或修复账号，至少需要 1 个可用账号。";
+    }
+    if ([self hasOnlyBackgroundTraffic]) {
+        return @"已看到 Codex 后台请求。请在 Codex 发起一次真实对话来完成确认。";
+    }
+    return @"打开 Codex 后发起一次真实对话；看到模型请求经过账号池后会自动确认。";
+}
+
+- (NSColor *)proxyConfirmationColor {
+    if ([self proxyTrafficConfirmed]) {
+        return NSColor.systemGreenColor;
+    }
+    if (!CPBool(self.statusSnapshot[@"running"]) || !CPBool(self.statusSnapshot[@"enabled"]) || ![self hasUsableAccount]) {
+        return NSColor.systemOrangeColor;
+    }
+    return NSColor.controlAccentColor;
+}
+
+- (NSView *)proxyConfirmationCard {
+    NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    header.spacing = 8;
+    [header addArrangedSubview:[self statusDotWithColor:[self proxyConfirmationColor]]];
+    [header addArrangedSubview:[self labelWithText:@"代理确认" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+    [header addArrangedSubview:[self labelWithText:[self proxyConfirmationTitle] font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:[self proxyConfirmationColor]]];
+    [stack addArrangedSubview:header];
+    [stack addArrangedSubview:[self emptyStateLabel:[self proxyConfirmationDetail]]];
+    return card;
+}
+
+- (NSDictionary *)selectionSnapshot {
+    return CPDict(self.statusSnapshot[@"selection"]);
+}
+
+- (NSString *)selectionExplanationText {
+    NSDictionary *selection = [self selectionSnapshot];
+    NSString *predicted = CPString(selection[@"predicted_account"]);
+    if (!selection.count) {
+        return @"额度优先正在等待代理在线后读取账号选择解释。";
+    }
+    if (!predicted.length) {
+        return @"额度优先暂时没有可用账号。请检查账号是否禁用、冷却、缺少令牌或认证异常。";
+    }
+    NSString *note = CPString(selection[@"note"]);
+    if ([note containsString:@"quota data is incomplete"]) {
+        return [NSString stringWithFormat:@"额度数据未完整刷新，当前会先使用账号 %@；额度恢复后继续按额度优先。", predicted];
+    }
+    return [NSString stringWithFormat:@"额度优先当前会使用账号 %@。系统会优先选择额度压力较低的账号。", predicted];
+}
+
+- (NSString *)selectionReasonForAccountName:(NSString *)name {
+    if (!name.length) {
+        return @"-";
+    }
+    NSDictionary *selection = [self selectionSnapshot];
+    NSString *predicted = CPString(selection[@"predicted_account"]);
+    if ([predicted isEqualToString:name]) {
+        NSString *note = CPString(selection[@"note"]);
+        if ([note containsString:@"quota data is incomplete"]) {
+            return @"当前候选；额度数据不完整时自动容错";
+        }
+        return @"当前候选；额度压力较低";
+    }
+    for (NSDictionary *row in CPArray(selection[@"accounts"])) {
+        if (![CPString(row[@"name"]) isEqualToString:name]) {
+            continue;
+        }
+        NSArray *reasons = CPArray(row[@"reasons"]);
+        if (!reasons.count) {
+            return @"可参与额度优先";
+        }
+        NSMutableArray<NSString *> *labels = [NSMutableArray array];
+        for (id reasonValue in reasons) {
+            NSString *reason = CPString(reasonValue);
+            if ([reason isEqualToString:@"disabled"]) {
+                [labels addObject:@"已禁用"];
+            } else if ([reason hasPrefix:@"rate_limit"] || [reason containsString:@"cooldown"]) {
+                [labels addObject:@"冷却中"];
+            } else if ([reason isEqualToString:@"missing_token"]) {
+                [labels addObject:@"缺少令牌"];
+            } else if ([reason isEqualToString:@"missing_quota"]) {
+                [labels addObject:@"额度待刷新"];
+            } else if (reason.length) {
+                [labels addObject:reason];
+            }
+        }
+        return labels.count ? [labels componentsJoinedByString:@"、"] : @"可参与额度优先";
+    }
+    return @"等待代理在线后解释";
+}
+
+- (NSView *)selectionExplanationCard {
+    NSView *card = [self cardView];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+    [stack addArrangedSubview:[self labelWithText:@"额度优先" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [stack addArrangedSubview:[self emptyStateLabel:[self selectionExplanationText]]];
     return card;
 }
 
 - (NSView *)setupChecklistCard {
     NSView *card = [self cardView];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    [card.heightAnchor constraintGreaterThanOrEqualToConstant:132].active = YES;
+    [card.heightAnchor constraintGreaterThanOrEqualToConstant:166].active = YES;
 
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -1007,26 +1290,76 @@ static NSColor *CPSidebarBorderColor(void) {
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
 
-    [stack addArrangedSubview:[self labelWithText:@"首次使用检查" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    header.spacing = 8;
+    [header addArrangedSubview:[self labelWithText:@"首次设置" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+    [header addArrangedSubview:[self actionButtonWithTitle:[self setupPrimaryActionTitle] symbol:[self setupPrimaryActionSymbol] selector:@selector(continueSetupAction:) primary:YES]];
+    [stack addArrangedSubview:header];
 
     BOOL runtimeReady = CPBool(self.statusSnapshot[@"runtime_exists"]) && CPBool(self.statusSnapshot[@"resource_runtime_exists"]);
     BOOL cliReady = CPBool(self.statusSnapshot[@"codex_cli_found"]);
-    BOOL serviceReady = CPBool(self.statusSnapshot[@"installed"]) && CPBool(self.statusSnapshot[@"loaded"])
-        && !CPBool(self.statusSnapshot[@"needs_repair"])
-        && !CPBool(self.statusSnapshot[@"version_mismatch"])
-        && !CPBool(self.statusSnapshot[@"migration_required"]);
+    BOOL serviceReady = [self serviceReady];
+    BOOL accountReady = [self hasUsableAccount];
     BOOL proxyReady = CPBool(self.statusSnapshot[@"enabled"]);
+    BOOL confirmed = [self proxyTrafficConfirmed];
     NSString *cliDetail = cliReady
         ? CPDisplayString(self.statusSnapshot[@"codex_cli"])
         : CPDisplayString(self.statusSnapshot[@"codex_cli_error"]);
     NSString *serviceDetail = serviceReady ? @"后台服务已运行" : @"点击“启动/修复/更新后台”安装、修复或更新";
+    NSString *accountDetail = accountReady
+        ? @"至少 1 个账号可用"
+        : ([self hasAnyAccount] ? @"已有账号需要启用、刷新令牌或解除冷却" : @"添加或导入账号后才能进入账号池");
     NSString *proxyDetail = proxyReady ? @"Codex 已配置为代理模式" : @"点击“启用代理”写入 Codex 配置";
+    NSString *openDetail = confirmed ? @"最近模型请求已确认走账号池" : @"打开 Codex 后发起一次真实对话";
 
-    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"运行资源" detail:runtimeReady ? @"运行目录已准备" : @"正在准备或缺少 App 内置资源" ok:runtimeReady]];
-    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"Codex" detail:cliDetail ok:cliReady]];
-    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"后台服务" detail:serviceDetail ok:serviceReady]];
-    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"代理配置" detail:proxyDetail ok:proxyReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"启动后台" detail:runtimeReady ? serviceDetail : @"正在准备或缺少 App 内置资源" ok:runtimeReady && serviceReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"检测 Codex" detail:cliDetail ok:cliReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"准备账号" detail:accountDetail ok:accountReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"启用代理" detail:proxyDetail ok:proxyReady]];
+    [stack addArrangedSubview:[self setupStatusLineWithTitle:@"确认走代理" detail:openDetail ok:confirmed]];
     return card;
+}
+
+- (NSString *)setupPrimaryActionTitle {
+    if (![self serviceReady]) {
+        return @"启动/修复";
+    }
+    if (!CPBool(self.statusSnapshot[@"codex_cli_found"])) {
+        return @"重新检测";
+    }
+    if (![self hasUsableAccount]) {
+        return [self hasAnyAccount] ? @"修复账号" : @"添加账号";
+    }
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        return @"启用代理";
+    }
+    if (![self proxyTrafficConfirmed]) {
+        return @"打开 Codex";
+    }
+    return @"刷新状态";
+}
+
+- (NSString *)setupPrimaryActionSymbol {
+    if (![self serviceReady]) {
+        return @"play.circle.fill";
+    }
+    if (!CPBool(self.statusSnapshot[@"codex_cli_found"])) {
+        return @"arrow.clockwise";
+    }
+    if (![self hasUsableAccount]) {
+        return [self hasAnyAccount] ? @"exclamationmark.triangle" : @"person.crop.circle.badge.plus";
+    }
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        return @"checkmark.shield";
+    }
+    if (![self proxyTrafficConfirmed]) {
+        return @"arrow.up.forward.app";
+    }
+    return @"arrow.clockwise";
 }
 
 - (NSView *)setupStatusLineWithTitle:(NSString *)title detail:(NSString *)detail ok:(BOOL)ok {
@@ -1058,12 +1391,12 @@ static NSColor *CPSidebarBorderColor(void) {
                           CPDisplayString(self.statusSnapshot[@"total_accounts"])];
     NSString *strategy = CPDisplayString(self.statusSnapshot[@"strategy"]);
     if ([strategy isEqualToString:@"-"]) {
-        strategy = CPBool(self.statusSnapshot[@"running"]) ? @"轮询" : @"-";
+        strategy = CPBool(self.statusSnapshot[@"running"]) ? @"额度优先" : @"-";
     }
     strategy = [self strategyTitleForValue:strategy];
     [row addArrangedSubview:[self metricCardWithTitle:@"代理状态" value:running detail:@"127.0.0.1:8800" color:runningColor]];
     [row addArrangedSubview:[self metricCardWithTitle:@"可用账号" value:accounts detail:@"active / total" color:NSColor.systemBlueColor]];
-    [row addArrangedSubview:[self metricCardWithTitle:@"选择策略" value:strategy detail:@"配置热更新" color:NSColor.systemPurpleColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"选择策略" value:strategy detail:@"自动容错" color:NSColor.systemPurpleColor]];
     return row;
 }
 
@@ -1429,36 +1762,21 @@ static NSColor *CPSidebarBorderColor(void) {
 }
 
 - (NSString *)strategyTitleForValue:(NSString *)value {
-    if ([value isEqualToString:@"round_robin"]) {
-        return @"轮询";
-    }
-    if ([value isEqualToString:@"most_available"]) {
-        return @"额度优先";
-    }
-    return CPDisplayString(value);
+    return @"额度优先";
 }
 
-- (NSString *)streamModeTitleForValue:(NSString *)value {
-    if ([value isEqualToString:@"hybrid"]) {
-        return @"混合";
+- (NSString *)productModeTitle {
+    NSString *mode = CPString(self.statusSnapshot[@"product_mode"]);
+    if (!mode.length) {
+        mode = CPString(CPDict(self.statusSnapshot[@"config"])[@"product_mode"]);
     }
-    if ([value isEqualToString:@"buffered"]) {
-        return @"完整缓冲";
+    if ([mode isEqualToString:@"compatibility"]) {
+        return @"兼容模式";
     }
-    if ([value isEqualToString:@"realtime"]) {
-        return @"实时";
+    if ([mode isEqualToString:@"diagnostic"]) {
+        return @"诊断模式";
     }
-    return CPDisplayString(value);
-}
-
-- (NSString *)streamModeDetailForValue:(NSString *)value {
-    if ([value isEqualToString:@"realtime"]) {
-        return @"实时转发；已开始输出后无法自动补完断流。";
-    }
-    if ([value isEqualToString:@"buffered"]) {
-        return @"完整读取到 response.completed 后回放。";
-    }
-    return @"先短暂预缓冲，长任务转完整缓冲并可换账号重试。";
+    return @"标准模式";
 }
 
 - (NSView *)accountAndInspectorRowWithCompact:(BOOL)compact {
@@ -1601,7 +1919,7 @@ static NSColor *CPSidebarBorderColor(void) {
     NSStackView *header = [[NSStackView alloc] init];
     header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     header.alignment = NSLayoutAttributeCenterY;
-    [header addArrangedSubview:[self labelWithText:@"额度与轮询" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [header addArrangedSubview:[self labelWithText:@"额度状态" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
     [header addArrangedSubview:[self smallButtonWithTitle:@"刷新额度" symbol:@"arrow.clockwise.circle" selector:@selector(refreshQuotaAction:)]];
@@ -1722,6 +2040,25 @@ static NSColor *CPSidebarBorderColor(void) {
     row.spacing = 10;
     row.distribution = NSStackViewDistributionFillEqually;
     row.translatesAutoresizingMaskIntoConstraints = NO;
+    BOOL runtimeMismatch = [self hasRuntimeManifestMismatch];
+    BOOL versionMismatch = [self hasVersionMismatch];
+    BOOL repairNeeded = CPBool(self.statusSnapshot[@"needs_repair"]) || runtimeMismatch || versionMismatch;
+    NSString *repairValue = @"正常";
+    NSString *repairDetail = @"后台服务路径";
+    NSColor *repairColor = NSColor.systemGreenColor;
+    if (versionMismatch) {
+        repairValue = @"需重开";
+        repairDetail = @"版本号不一致";
+        repairColor = NSColor.systemOrangeColor;
+    } else if (runtimeMismatch) {
+        repairValue = @"需同步";
+        repairDetail = @"运行文件未同步";
+        repairColor = NSColor.systemOrangeColor;
+    } else if (repairNeeded) {
+        repairValue = @"需要修复";
+        repairDetail = @"后台服务路径不一致";
+        repairColor = NSColor.systemRedColor;
+    }
     [row addArrangedSubview:[self metricCardWithTitle:@"Codex 模式"
                                                 value:[self codexModeTitle]
                                                detail:[self codexModeDetail]
@@ -1731,9 +2068,9 @@ static NSColor *CPSidebarBorderColor(void) {
                                                detail:[self launchAgentDetail]
                                                 color:[self launchAgentColor]]];
     [row addArrangedSubview:[self metricCardWithTitle:@"修复建议"
-                                                value:CPBool(self.statusSnapshot[@"needs_repair"]) ? @"需要修复" : @"正常"
-                                               detail:CPBool(self.statusSnapshot[@"needs_repair"]) ? @"后台服务路径不一致" : @"后台服务路径"
-                                                color:CPBool(self.statusSnapshot[@"needs_repair"]) ? NSColor.systemRedColor : NSColor.systemGreenColor]];
+                                                value:repairValue
+                                               detail:repairDetail
+                                                color:repairColor]];
     return row;
 }
 
@@ -1755,75 +2092,11 @@ static NSColor *CPSidebarBorderColor(void) {
     [header addArrangedSubview:[self labelWithText:@"选择策略" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-
-    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
-    control.segmentCount = 2;
-    [control setLabel:@"轮询" forSegment:0];
-    [control setLabel:@"额度优先" forSegment:1];
-    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
-    control.target = self;
-    control.action = @selector(strategyAction:);
-    control.translatesAutoresizingMaskIntoConstraints = NO;
-    control.controlSize = NSControlSizeSmall;
-    [control.widthAnchor constraintEqualToConstant:180].active = YES;
-    NSString *strategy = CPString(self.statusSnapshot[@"strategy"]);
-    control.selectedSegment = [strategy isEqualToString:@"most_available"] ? 1 : 0;
-    [header addArrangedSubview:control];
+    [header addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"额度优先 · %@", [self productModeTitle]] font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:NSColor.controlAccentColor]];
     [stack addArrangedSubview:header];
 
-    NSString *detail = [NSString stringWithFormat:@"当前策略：%@。切换后立即写入配置，下次账号选择即生效。",
-                        [self strategyTitleForValue:strategy.length ? strategy : @"round_robin"]];
-    NSTextField *detailLabel = [self emptyStateLabel:detail];
-    [stack addArrangedSubview:detailLabel];
-    return card;
-}
-
-- (NSView *)streamModeCard {
-    NSView *card = [self cardView];
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSStackView *stack = [[NSStackView alloc] init];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.spacing = 8;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:stack];
-    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
-
-    NSStackView *header = [[NSStackView alloc] init];
-    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    header.alignment = NSLayoutAttributeCenterY;
-    header.spacing = 10;
-    [header addArrangedSubview:[self labelWithText:@"Codex 流模式" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
-    NSView *flex = [[NSView alloc] init];
-    [header addArrangedSubview:flex];
-
-    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
-    control.segmentCount = 3;
-    [control setLabel:@"混合" forSegment:0];
-    [control setLabel:@"缓冲" forSegment:1];
-    [control setLabel:@"实时" forSegment:2];
-    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
-    control.target = self;
-    control.action = @selector(streamModeAction:);
-    control.translatesAutoresizingMaskIntoConstraints = NO;
-    control.controlSize = NSControlSizeSmall;
-    [control.widthAnchor constraintEqualToConstant:220].active = YES;
-    NSString *mode = CPString(self.statusSnapshot[@"codex_stream_mode"]);
-    if ([mode isEqualToString:@"buffered"]) {
-        control.selectedSegment = 1;
-    } else if ([mode isEqualToString:@"realtime"]) {
-        control.selectedSegment = 2;
-    } else {
-        mode = @"hybrid";
-        control.selectedSegment = 0;
-    }
-    [header addArrangedSubview:control];
-    [stack addArrangedSubview:header];
-
-    NSString *detail = [NSString stringWithFormat:@"当前模式：%@。%@",
-                        [self streamModeTitleForValue:mode],
-                        [self streamModeDetailForValue:mode]];
-    [stack addArrangedSubview:[self emptyStateLabel:detail]];
+    [stack addArrangedSubview:[self emptyStateLabel:@"小腊肠会优先选择额度压力较低的账号。额度数据不完整时会自动保持可用账号轮换，不需要手动切换策略。"]];
+    [stack addArrangedSubview:[self emptyStateLabel:[self selectionExplanationText]]];
     return card;
 }
 
@@ -1836,10 +2109,8 @@ static NSColor *CPSidebarBorderColor(void) {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
-    [stack addArrangedSubview:[self labelWithText:@"配置与路径" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [stack addArrangedSubview:[self labelWithText:@"路径与诊断" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"Codex CLI" value:CPBool(self.statusSnapshot[@"codex_cli_found"]) ? CPDisplayString(self.statusSnapshot[@"codex_cli"]) : @"未找到"]];
-    [stack addArrangedSubview:[self infoRowWithTitle:@"Provider" value:CPDisplayString(self.statusSnapshot[@"codex_provider_base_url"])]];
-    [stack addArrangedSubview:[self infoRowWithTitle:@"WebSocket" value:CPBool(self.statusSnapshot[@"codex_provider_supports_websockets"]) ? @"开启" : @"未开启"]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"运行目录" value:CPDisplayString(self.statusSnapshot[@"runtime_dir"])]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"源码/资源" value:CPDisplayString(self.statusSnapshot[@"source_dir"])]];
     NSStackView *buttons = [[NSStackView alloc] init];
@@ -1885,6 +2156,37 @@ static NSColor *CPSidebarBorderColor(void) {
     [stack addArrangedSubview:[self infoRowWithTitle:@"后台版本" value:CPDisplayString(proxyVersion)]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"Manifest" value:CPBool(self.statusSnapshot[@"manifest_ok"]) ? @"一致" : @"需检查"]];
     if (!compact) {
+        NSDictionary *manifest = [self runtimeManifestSnapshot];
+        NSDictionary<NSString *, NSString *> *titles = @{
+            @"changed": @"变更文件",
+            @"missing": @"缺失文件",
+            @"extra": @"多余文件",
+            @"expected_missing": @"内置缺失",
+            @"observed_missing": @"运行缺失",
+        };
+        for (NSString *key in @[@"changed", @"missing", @"extra", @"expected_missing", @"observed_missing"]) {
+            NSArray *items = CPArray(manifest[key]);
+            if (items.count == 0) {
+                continue;
+            }
+            NSMutableArray<NSString *> *names = [NSMutableArray array];
+            for (id item in items) {
+                NSString *name = CPString(item);
+                if (name.length) {
+                    [names addObject:name];
+                }
+            }
+            if (names.count) {
+                [stack addArrangedSubview:[self infoRowWithTitle:titles[key] value:[names componentsJoinedByString:@", "]]];
+            }
+        }
+        NSString *manifestError = CPString(self.statusSnapshot[@"manifest_error"]);
+        if (!manifestError.length) {
+            manifestError = CPString(manifest[@"error"]);
+        }
+        if (manifestError.length) {
+            [stack addArrangedSubview:[self infoRowWithTitle:@"Manifest 错误" value:manifestError]];
+        }
         [stack addArrangedSubview:[self infoRowWithTitle:@"LaunchAgent" value:CPDisplayString(self.statusSnapshot[@"installed_program"])]];
     }
     return stack;
@@ -2341,70 +2643,135 @@ static NSColor *CPSidebarBorderColor(void) {
 
 #pragma mark - Data Refresh
 
+- (NSDictionary *)snapshotPayloadRefreshingQuota:(BOOL)refreshQuota
+                              quotaRefreshResult:(NSDictionary **)quotaRefreshResult
+                                     proxyOnline:(BOOL *)proxyOnline {
+    NSDictionary *localStatus = [self runPythonJSONSync:@[@"status"] rawText:nil];
+    NSDictionary *remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
+    BOOL isProxyOnline = [remoteStatus isKindOfClass:NSDictionary.class] && CPBool(remoteStatus[@"running"]);
+    if (proxyOnline) {
+        *proxyOnline = isProxyOnline;
+    }
+
+    NSMutableDictionary *mergedStatus = [localStatus isKindOfClass:NSDictionary.class] ? [localStatus mutableCopy] : [NSMutableDictionary dictionary];
+    if (isProxyOnline) {
+        [mergedStatus addEntriesFromDictionary:remoteStatus];
+        id remoteSelection = [self fetchJSONPath:@"/api/selection" method:@"GET" timeout:2.0];
+        if ([remoteSelection isKindOfClass:NSDictionary.class]) {
+            mergedStatus[@"selection"] = remoteSelection;
+        }
+    } else if (!mergedStatus.count) {
+        mergedStatus[@"running"] = @NO;
+    }
+    NSDictionary *status = mergedStatus;
+
+    NSArray *accounts = @[];
+    NSDictionary *quota = @{};
+    NSDictionary *tokenUsage = @{};
+    if (isProxyOnline) {
+        if (refreshQuota) {
+            id refreshResult = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
+            if ([refreshResult isKindOfClass:NSDictionary.class] && quotaRefreshResult) {
+                *quotaRefreshResult = refreshResult;
+            }
+        }
+        id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
+        if ([remoteAccounts isKindOfClass:NSArray.class]) {
+            accounts = remoteAccounts;
+        }
+        id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
+        if ([remoteQuota isKindOfClass:NSDictionary.class]) {
+            quota = remoteQuota;
+        }
+        id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage?daily_days=371" method:@"GET" timeout:2.0];
+        if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
+            tokenUsage = remoteTokenUsage;
+        }
+    }
+    if (!accounts.count) {
+        NSDictionary *local = [self runPythonJSONSync:@[@"list-accounts"] rawText:nil];
+        accounts = CPArray(local[@"accounts"]);
+        if (!status[@"total_accounts"]) {
+            NSMutableDictionary *merged = [status mutableCopy] ?: [NSMutableDictionary dictionary];
+            merged[@"total_accounts"] = local[@"total_accounts"] ?: @(accounts.count);
+            merged[@"active_accounts"] = local[@"active_accounts"] ?: @0;
+            status = merged;
+        }
+    }
+
+    return @{
+        @"status": status ?: @{},
+        @"accounts": accounts ?: @[],
+        @"quota": quota ?: @{},
+        @"tokenUsage": tokenUsage ?: @{},
+    };
+}
+
+- (void)applySnapshotPayload:(NSDictionary *)payload {
+    self.statusSnapshot = CPDict(payload[@"status"]);
+    self.accounts = CPArray(payload[@"accounts"]);
+    self.quotaSnapshot = CPDict(payload[@"quota"]);
+    self.tokenUsageSnapshot = CPDict(payload[@"tokenUsage"]);
+    if (!self.selectedAccountName.length && self.accounts.count) {
+        self.selectedAccountName = CPString(self.accounts.firstObject[@"name"]);
+    }
+}
+
+- (void)applySilentSnapshotPayload:(NSDictionary *)payload {
+    NSString *selectedBefore = self.selectedAccountName ?: @"";
+    [self applySnapshotPayload:payload];
+    if (selectedBefore.length) {
+        self.selectedAccountName = selectedBefore;
+    }
+    [self updateStatusViews];
+    [self updateHeaderText];
+    if (self.accountTable) {
+        [self reloadAccountTableSelection];
+    }
+}
+
 - (void)refreshSnapshots:(id)sender {
-    if (self.busy) {
+    if (self.busy || self.refreshInFlight) {
         return;
     }
+    self.refreshInFlight = YES;
     [self setBusy:YES message:@"正在刷新状态..."];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *localStatus = [self runPythonJSONSync:@[@"status"] rawText:nil];
-        NSDictionary *remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
-        BOOL proxyOnline = [remoteStatus isKindOfClass:NSDictionary.class] && CPBool(remoteStatus[@"running"]);
-        NSMutableDictionary *mergedStatus = [localStatus isKindOfClass:NSDictionary.class] ? [localStatus mutableCopy] : [NSMutableDictionary dictionary];
-        if (proxyOnline) {
-            [mergedStatus addEntriesFromDictionary:remoteStatus];
-        } else if (!mergedStatus.count) {
-            mergedStatus[@"running"] = @NO;
-        }
-        NSDictionary *status = mergedStatus;
-
-        NSArray *accounts = @[];
-        NSDictionary *quota = @{};
-        NSDictionary *tokenUsage = @{};
         NSDictionary *quotaRefreshResult = nil;
-        if (proxyOnline) {
-            id refreshResult = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
-            if ([refreshResult isKindOfClass:NSDictionary.class]) {
-                quotaRefreshResult = refreshResult;
-            }
-            id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
-            if ([remoteAccounts isKindOfClass:NSArray.class]) {
-                accounts = remoteAccounts;
-            }
-            id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
-            if ([remoteQuota isKindOfClass:NSDictionary.class]) {
-                quota = remoteQuota;
-            }
-            id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage?daily_days=371" method:@"GET" timeout:2.0];
-            if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
-                tokenUsage = remoteTokenUsage;
-            }
-        }
-        if (!accounts.count) {
-            NSDictionary *local = [self runPythonJSONSync:@[@"list-accounts"] rawText:nil];
-            accounts = CPArray(local[@"accounts"]);
-            if (!status[@"total_accounts"]) {
-                NSMutableDictionary *merged = [status mutableCopy] ?: [NSMutableDictionary dictionary];
-                merged[@"total_accounts"] = local[@"total_accounts"] ?: @(accounts.count);
-                merged[@"active_accounts"] = local[@"active_accounts"] ?: @0;
-                status = merged;
-            }
-        }
+        BOOL proxyOnline = NO;
+        NSDictionary *payload = [self snapshotPayloadRefreshingQuota:YES
+                                                   quotaRefreshResult:&quotaRefreshResult
+                                                          proxyOnline:&proxyOnline];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.statusSnapshot = status ?: @{};
-            self.accounts = accounts ?: @[];
-            self.quotaSnapshot = quota ?: @{};
-            self.tokenUsageSnapshot = tokenUsage ?: @{};
-            if (!self.selectedAccountName.length && self.accounts.count) {
-                self.selectedAccountName = CPString(self.accounts.firstObject[@"name"]);
-            }
+            self.refreshInFlight = NO;
+            [self applySnapshotPayload:payload];
             [self updateStatusViews];
             [self renderActiveSection];
             NSString *message = proxyOnline
                 ? (quotaRefreshResult ? @"状态和额度已刷新" : @"状态已刷新，额度刷新失败")
                 : @"状态已刷新";
             [self setBusy:NO message:message];
+        });
+    });
+}
+
+- (void)autoRefreshSnapshots:(id)sender {
+    if (self.busy || self.refreshInFlight) {
+        return;
+    }
+    self.refreshInFlight = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL proxyOnline = NO;
+        NSDictionary *payload = [self snapshotPayloadRefreshingQuota:NO
+                                                   quotaRefreshResult:nil
+                                                          proxyOnline:&proxyOnline];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.refreshInFlight = NO;
+            if (self.busy) {
+                return;
+            }
+            [self applySilentSnapshotPayload:payload];
         });
     });
 }
@@ -2418,13 +2785,21 @@ static NSColor *CPSidebarBorderColor(void) {
     NSString *online = running ? @"代理在线" : @"代理离线";
     if ([self hasVersionMismatch]) {
         online = @"版本不同步";
+    } else if ([self hasRuntimeManifestMismatch]) {
+        online = @"运行文件未同步";
     }
     NSString *accounts = [NSString stringWithFormat:@"%@/%@ 可用",
                           CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                           CPDisplayString(self.statusSnapshot[@"total_accounts"])];
+    NSString *sidebarState = running ? @"在线" : @"离线";
+    if ([self hasVersionMismatch]) {
+        sidebarState = @"需重开";
+    } else if ([self hasRuntimeManifestMismatch]) {
+        sidebarState = @"需同步";
+    }
     self.subtitleLabel.stringValue = [NSString stringWithFormat:@"%@ · %@ · %@", online, accounts, [self codexModeDetail]];
     self.sidebarStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · %@/%@ 可用",
-                                           [self hasVersionMismatch] ? @"需重开" : (running ? @"在线" : @"离线"),
+                                           sidebarState,
                                            CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                                            CPDisplayString(self.statusSnapshot[@"total_accounts"])];
 }
@@ -2433,7 +2808,7 @@ static NSColor *CPSidebarBorderColor(void) {
     NSDictionary *titles = @{
         @"overview": @[@"总览", @"额度和 Token 活动。"],
         @"accounts": @[@"账号", @"代理、账号池和运行状态。"],
-        @"config": @[@"配置", @"检查 LaunchAgent、代理模式和策略。"],
+        @"config": @[@"配置", @"额度优先、代理模式和运行诊断。"],
         @"logs": @[@"日志", @"查看操作结果、日志和路径诊断。"],
     };
     NSArray *pair = titles[self.activeSection] ?: titles[@"overview"];
@@ -2442,6 +2817,8 @@ static NSColor *CPSidebarBorderColor(void) {
     NSString *state = running ? @"代理在线" : @"代理离线";
     if ([self hasVersionMismatch]) {
         state = @"版本不同步";
+    } else if ([self hasRuntimeManifestMismatch]) {
+        state = @"运行文件未同步";
     }
     self.subtitleLabel.stringValue = [NSString stringWithFormat:@"%@ · %@", state, pair[1]];
 }
@@ -2523,6 +2900,36 @@ static NSColor *CPSidebarBorderColor(void) {
     [self performAction:@[@"repair"] label:@"启动/修复/更新后台" refreshAfter:YES fromBundle:YES];
 }
 
+- (void)continueSetupAction:(id)sender {
+    if (![self serviceReady]) {
+        [self repairAction:sender];
+        return;
+    }
+    if (!CPBool(self.statusSnapshot[@"codex_cli_found"])) {
+        [self refreshSnapshots:sender];
+        return;
+    }
+    if (![self hasUsableAccount]) {
+        if ([self hasAnyAccount]) {
+            self.activeSection = @"accounts";
+            [self updateNavigationSelection];
+            [self renderActiveSection];
+            return;
+        }
+        [self startLoginAction:sender];
+        return;
+    }
+    if (!CPBool(self.statusSnapshot[@"enabled"])) {
+        [self enableProxyAction:sender];
+        return;
+    }
+    if (![self proxyTrafficConfirmed]) {
+        [self openCodexAction:sender];
+        return;
+    }
+    [self refreshSnapshots:sender];
+}
+
 - (void)enableProxyAction:(id)sender {
     [self performAction:@[@"enable-codex-proxy"] label:@"启用 Codex 代理" refreshAfter:YES];
 }
@@ -2546,28 +2953,9 @@ static NSColor *CPSidebarBorderColor(void) {
     [self performAction:@[@"repair-open-web"] label:@"打开网页状态页" refreshAfter:YES fromBundle:YES];
 }
 
-- (void)strategyAction:(NSSegmentedControl *)sender {
-    NSString *strategy = sender.selectedSegment == 1 ? @"most_available" : @"round_robin";
-    [self performAction:@[@"set-rotation-strategy", @"--strategy", strategy]
-                  label:[NSString stringWithFormat:@"切换选择策略为 %@", [self strategyTitleForValue:strategy]]
-           refreshAfter:YES];
-}
-
 - (void)tokenUsageModeAction:(NSSegmentedControl *)sender {
     self.tokenUsageMode = MAX(0, MIN(2, sender.selectedSegment));
     [self renderActiveSection];
-}
-
-- (void)streamModeAction:(NSSegmentedControl *)sender {
-    NSString *mode = @"hybrid";
-    if (sender.selectedSegment == 1) {
-        mode = @"buffered";
-    } else if (sender.selectedSegment == 2) {
-        mode = @"realtime";
-    }
-    [self performAction:@[@"set-codex-stream-mode", @"--stream-mode", mode]
-                  label:[NSString stringWithFormat:@"切换 Codex 流模式为 %@", [self streamModeTitleForValue:mode]]
-           refreshAfter:YES];
 }
 
 - (void)scanAccountsAction:(id)sender {
@@ -3180,6 +3568,9 @@ static NSColor *CPSidebarBorderColor(void) {
         NSTextField *summaryLabel = [self labelWithText:summary font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
         summaryLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         [self.inspectorStack addArrangedSubview:summaryLabel];
+        NSTextField *reasonLabel = [self labelWithText:[self selectionReasonForAccountName:CPString(account[@"name"])] font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
+        reasonLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [self.inspectorStack addArrangedSubview:reasonLabel];
 
         NSStackView *buttonRow = [[NSStackView alloc] init];
         buttonRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -3204,6 +3595,7 @@ static NSColor *CPSidebarBorderColor(void) {
     [self.inspectorStack addArrangedSubview:[self labelWithText:CPDisplayString(account[@"email"]) font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
 
     [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"Token" value:CPRelativeTime(account[@"expires_at"])]];
+    [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"选择原因" value:[self selectionReasonForAccountName:CPString(account[@"name"])]]];
     [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"5h 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
     [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"7d 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
     [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"Account ID" value:CPDisplayString(account[@"account_id"])]];

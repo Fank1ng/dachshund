@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.4 - 2026-06-14
+
+- Added a first-success guide in the macOS app that walks through backend startup, Codex detection, account readiness, proxy enablement, opening Codex, and confirming model traffic is pooled.
+- Simplified user-facing configuration to a single “额度优先” strategy while keeping round-robin fallback and legacy config compatibility internally.
+- Hid advanced stream, heartbeat, timeout, quota-weight, and Web status controls from the normal macOS app surface.
+- Made the macOS app's automatic refresh sync status quietly without disabling controls, changing sections, or rebuilding the active view.
+
 ## v0.6.3 - 2026-06-14
 
 - Refined the macOS control app sidebar for light appearance with native-feeling dynamic colors.
