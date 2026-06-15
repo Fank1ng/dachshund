@@ -449,6 +449,15 @@ async def api_status(request: web.Request) -> web.Response:
         item for item in recent_requests
         if _is_known_background_request(str(item.get("path", "")))
     ]
+    remote_account = pool.fixed_account_report(get("remote_account"))
+    recent_remote_requests = [
+        item for item in recent_requests
+        if item.get("route_class") in {"remote_fixed", "backend_fixed"}
+    ]
+    recent_remote_errors = [
+        item for item in recent_remote_requests
+        if int(item.get("status") or 0) >= 400
+    ]
     return web.json_response({
         "version": APP_VERSION,
         "bundle_version": service.get("bundle_version"),
@@ -481,6 +490,16 @@ async def api_status(request: web.Request) -> web.Response:
         "port": get("port"),
         "strategy": get("rotation_strategy"),
         "product_mode": get("product_mode"),
+        "remote_proxy_mode": get("remote_proxy_mode"),
+        "remote_account": remote_account.get("configured"),
+        "remote_account_selected": remote_account.get("selected"),
+        "remote_account_available": remote_account.get("available"),
+        "remote_account_reason": remote_account.get("reason"),
+        "remote_requests": {
+            "recent_total": len(recent_remote_requests),
+            "recent_errors": len(recent_remote_errors),
+            "last": recent_remote_requests[0] if recent_remote_requests else None,
+        },
         "stats": pool.stats,
         "last_request": pool.recent_requests[0] if pool.recent_requests else None,
         "recent_requests": recent_requests,
@@ -500,6 +519,14 @@ async def api_status(request: web.Request) -> web.Response:
             "session_affinity_enabled": get("session_affinity_enabled"),
             "session_affinity_ttl_seconds": get("session_affinity_ttl_seconds"),
             "session_affinity_size": pool.session_affinity_size(),
+            "remote_proxy_mode": get("remote_proxy_mode"),
+            "remote_account": get("remote_account"),
+        },
+        "remote_proxy": {
+            "mode": get("remote_proxy_mode"),
+            "account": remote_account,
+            "recent_requests": recent_remote_requests[:10],
+            "recent_errors": recent_remote_errors[:10],
         },
         "model_proxy": {
             "observed": bool(recent_potential_quota_requests),

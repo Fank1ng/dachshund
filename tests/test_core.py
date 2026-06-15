@@ -49,6 +49,7 @@ from proxy_core import (
     _is_models_path,
     _is_openai_inference_path,
     _is_codex_responses_path,
+    _route_class,
     _record_buffered_stream_interrupted,
     _record_client_disconnect,
     _record_stream_interrupted,
@@ -127,6 +128,8 @@ class ConfigTests(unittest.TestCase):
         cfg = validate({})
         self.assertEqual(cfg["rotation_strategy"], "most_available")
         self.assertEqual(cfg["product_mode"], "standard")
+        self.assertEqual(cfg["remote_proxy_mode"], "fixed_account")
+        self.assertEqual(cfg["remote_account"], "current")
 
     def test_validate_preserves_legacy_round_robin_strategy(self):
         cfg = validate({"rotation_strategy": "round_robin"})
@@ -160,6 +163,10 @@ class ConfigTests(unittest.TestCase):
     def test_validate_rejects_unknown_codex_stream_mode(self):
         with self.assertRaises(ConfigError):
             validate({"codex_stream_mode": "sometimes"})
+
+    def test_validate_rejects_unknown_remote_proxy_mode(self):
+        with self.assertRaises(ConfigError):
+            validate({"remote_proxy_mode": "rotate"})
 
     def test_validate_rejects_zero_quota_weights(self):
         with self.assertRaises(ConfigError):
@@ -247,6 +254,30 @@ class AccountTests(unittest.TestCase):
         pool.record_request(account, "/v1/test", 200, 12.3, 0, "req123")
         self.assertEqual(pool.recent_requests[0]["request_id"], "req123")
 
+    def test_record_request_keeps_remote_route_diagnostics(self):
+        pool = AccountPool()
+        account = Account("current", Path(tempfile.mkdtemp()) / "auth.json")
+        pool.record_request(
+            account,
+            "/backend-api/remote",
+            101,
+            12.3,
+            0,
+            "req123",
+            transport="websocket",
+            route_class="remote_fixed",
+            selected_account="current",
+            fixed_account="current",
+            upstream_path="/backend-api/remote",
+            ws_close_code=1000,
+            auth_refresh_result="success",
+        )
+        row = pool.recent_requests[0]
+        self.assertEqual(row["route_class"], "remote_fixed")
+        self.assertEqual(row["fixed_account"], "current")
+        self.assertEqual(row["ws_close_code"], 1000)
+        self.assertEqual(row["auth_refresh_result"], "success")
+
     def test_record_local_request_uses_local_account_label(self):
         pool = AccountPool()
         pool.record_local_request("/v1/models", 200, 0.5, "local123")
@@ -280,6 +311,30 @@ class AccountTests(unittest.TestCase):
         report = pool.selection_report()
         self.assertEqual(report["predicted_account"], "b")
         self.assertIn("disabled", report["accounts"][0]["reasons"])
+
+    def test_fixed_account_prefers_current_without_rate_limit_filter(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        current.rate_limited_until = time.time() + 60
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+        pool.accounts = [other, current]
+
+        account, reason = pool.fixed_account_selection("current")
+
+        self.assertEqual(account.name, "current")
+        self.assertEqual(reason, "current")
+
+    def test_fixed_account_reports_missing_specified_account(self):
+        pool = AccountPool()
+
+        report = pool.fixed_account_report("missing")
+
+        self.assertFalse(report["available"])
+        self.assertEqual(report["configured"], "missing")
+        self.assertEqual(report["reason"], "not_found")
 
     def test_cooldown_reason_round_trip(self):
         pool = AccountPool()
@@ -1481,6 +1536,46 @@ class ProxyStatusTests(unittest.TestCase):
         self.assertTrue(proxy._is_potential_quota_request("/backend-api/codex/responses"))
         self.assertFalse(proxy._is_potential_quota_request("/backend-api/codex/sessions"))
 
+    def test_status_reports_missing_remote_account(self):
+        old_accounts = proxy.pool.accounts
+        proxy.pool.accounts = []
+        request = mock.Mock()
+        request.app = {}
+
+        def fake_get(key):
+            return {
+                "port": 8800,
+                "rotation_strategy": "round_robin",
+                "product_mode": "standard",
+                "remote_proxy_mode": "fixed_account",
+                "remote_account": "missing",
+                "codex_stream_mode": "realtime",
+                "codex_stream_mode_user_set": False,
+                "codex_hybrid_probe_seconds": 8,
+                "codex_hybrid_probe_bytes": 262144,
+                "codex_stream_retry_cooldown": 0,
+                "rate_limit_cooldown": 60,
+                "stream_keepalive_seconds": 15,
+                "stream_bootstrap_retries": 1,
+                "nonstream_keepalive_interval": 15,
+                "websocket_heartbeat_seconds": 0,
+                "session_affinity_enabled": True,
+                "session_affinity_ttl_seconds": 3600,
+            }.get(key)
+
+        try:
+            with mock.patch("proxy.service_manager.status", return_value={}), \
+                    mock.patch("proxy.get", side_effect=fake_get):
+                response = asyncio.run(proxy.api_status(request))
+        finally:
+            proxy.pool.accounts = old_accounts
+
+        data = json.loads(response.text)
+        self.assertEqual(data["remote_proxy_mode"], "fixed_account")
+        self.assertEqual(data["remote_account"], "missing")
+        self.assertFalse(data["remote_account_available"])
+        self.assertEqual(data["remote_account_reason"], "not_found")
+
     def test_quota_api_tolerates_partially_written_file(self):
         old_accounts_dir = proxy.ACCOUNTS_DIR
         old_accounts = proxy.pool.accounts
@@ -1714,6 +1809,28 @@ class _FakeWSSession:
         return outcome
 
 
+def _proxy_test_config(key):
+    return {
+        "codex_stream_mode": "realtime",
+        "stream_bootstrap_retries": 1,
+        "stream_keepalive_seconds": 0,
+        "codex_stream_retry_cooldown": 0,
+        "rate_limit_cooldown": 60,
+        "max_retries": 10,
+        "max_request_body_mb": 512,
+        "rotation_strategy": "round_robin",
+        "upstream_connect_timeout_sec": 10,
+        "upstream_transient_retries": 0,
+        "upstream_transient_backoff_ms": 0,
+        "session_affinity_enabled": True,
+        "session_affinity_ttl_seconds": 3600,
+        "remote_proxy_mode": "fixed_account",
+        "remote_account": "current",
+        "websocket_heartbeat_seconds": 0,
+        "nonstream_keepalive_interval": 0,
+    }.get(key)
+
+
 class ProxyCoreRoutingTests(unittest.TestCase):
     def test_codex_responses_2xx_streams_even_with_json_content_type(self):
         response = mock.Mock()
@@ -1750,6 +1867,14 @@ class ProxyCoreRoutingTests(unittest.TestCase):
             _target_url("https://chatgpt.com", "/v1/responses/compact", "foo=bar"),
             "https://chatgpt.com/backend-api/codex/responses/compact?foo=bar",
         )
+
+    def test_route_class_keeps_model_paths_in_pool(self):
+        self.assertEqual(_route_class("/v1/responses"), "model_pool")
+        self.assertEqual(_route_class("/backend-api/codex/responses"), "model_pool")
+
+    def test_route_class_fixes_remote_and_unknown_backend_paths(self):
+        self.assertEqual(_route_class("/backend-api/codex/sessions"), "remote_fixed")
+        self.assertEqual(_route_class("/backend-api/wham/apps"), "backend_fixed")
 
     def test_non_codex_json_response_does_not_force_streaming(self):
         response = mock.Mock()
@@ -1998,6 +2123,109 @@ class ProxyCoreTests(unittest.TestCase):
 
         self.assertEqual(headers["User-Agent"], "codex-cli")
         self.assertNotIn("Origin", headers)
+
+    def test_backend_http_uses_fixed_current_account(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+        pool.accounts = [current, other]
+        session = _FakeHTTPSession([
+            _FakeHTTPUpstreamResponse([b'{"ok":true}'])
+        ])
+        request = _FakeRequest(path="/backend-api/wham/apps", method="GET")
+
+        with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
+                mock.patch("account_manager.get", side_effect=_proxy_test_config):
+            response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
+        self.assertEqual(pool.recent_requests[0]["route_class"], "backend_fixed")
+        self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
+
+    def test_model_responses_still_use_pool_selection(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        current.rate_limited_until = time.time() + 60
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+        pool.accounts = [current, other]
+        session = _FakeHTTPSession([
+            _FakeHTTPUpstreamResponse([b'{"error":"bad"}'], status=400)
+        ])
+        request = _FakeRequest(path="/v1/responses")
+
+        with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
+                mock.patch("account_manager.get", side_effect=_proxy_test_config):
+            response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-other")
+        self.assertEqual(pool.recent_requests[0]["route_class"], "model_pool")
+        self.assertEqual(pool.recent_requests[0]["selected_account"], "other")
+
+    def test_fixed_backend_401_refresh_failure_does_not_switch_accounts(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+
+        async def fail_refresh():
+            return False
+
+        current.refresh = fail_refresh
+        pool.accounts = [current, other]
+        session = _FakeHTTPSession([
+            _FakeHTTPUpstreamResponse([b'auth failed'], status=401)
+        ])
+        request = _FakeRequest(path="/backend-api/connections")
+
+        with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
+                mock.patch("account_manager.get", side_effect=_proxy_test_config):
+            response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
+        self.assertEqual(pool.recent_requests[0]["auth_refresh_result"], "failed")
+
+    def test_backend_websocket_uses_fixed_current_account(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+        pool.accounts = [current, other]
+        client_ws = _FakeWebSocket()
+        upstream_ws = _FakeWebSocket([
+            aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "hello", ""),
+        ], close_code=1000)
+        session = _FakeWSSession([upstream_ws])
+        request = _FakeRequest(
+            path="/backend-api/remote-control",
+            headers={"Upgrade": "websocket", "Sec-WebSocket-Protocol": "codex"},
+        )
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+                mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
+                mock.patch("account_manager.get", side_effect=_proxy_test_config):
+            response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
+
+        self.assertIs(response, client_ws)
+        self.assertEqual(session.calls[0][0], "wss://chatgpt.com/backend-api/remote-control")
+        self.assertEqual(session.calls[0][1]["headers"]["Authorization"], "Bearer token-current")
+        self.assertEqual(session.calls[0][1]["protocols"], ["codex"])
+        self.assertEqual(pool.recent_requests[0]["route_class"], "remote_fixed")
+        self.assertEqual(pool.recent_requests[0]["transport"], "websocket")
+        self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
 
     def test_retry_after_seconds(self):
         self.assertEqual(_retry_after_seconds("42"), 42)

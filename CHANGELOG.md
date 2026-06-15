@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.8 - 2026-06-16
+
+- Added full-proxy iPhone Remote compatibility by keeping non-model ChatGPT backend traffic on a fixed primary account while Codex model responses continue using the pooled account rotation.
+- Added transparent fixed-account WebSocket forwarding for `/backend-api/*` remote-control paths and richer route diagnostics in recent requests.
+- Exposed remote compatibility status in `/api/status` and the Web status page.
+
 ## v0.6.7 - 2026-06-15
 
 - Changed the macOS app into a menu-bar-first control center with a flat settings-style overview, larger token heatmap, account split view, and unified quota totals.

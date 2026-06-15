@@ -1,6 +1,6 @@
 #define MyAppName "Codex Proxy Control"
 #ifndef MyAppVersion
-#define MyAppVersion "0.6.7"
+#define MyAppVersion "0.6.8"
 #endif
 #ifndef SourceDir
 #define SourceDir "dist\windows"

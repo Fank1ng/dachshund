@@ -321,6 +321,43 @@ class AccountPool:
 
         return self.pick(exclude=exclude), False
 
+    def pick_fixed_account(self, preferred: Optional[str] = None) -> Optional["Account"]:
+        account, _ = self.fixed_account_selection(preferred)
+        return account
+
+    def fixed_account_selection(self, preferred: Optional[str] = None) -> tuple[Optional["Account"], str]:
+        """Return the stable account used for non-model ChatGPT backend traffic."""
+        requested = (preferred or get("remote_account") or "current").strip() or "current"
+        if requested != "current":
+            account = self.get(requested)
+            if not account:
+                return None, "not_found"
+            if not self._is_fixed_eligible(account):
+                return None, "unavailable"
+            return account, "specified"
+
+        current = self.get("current")
+        if current:
+            if self._is_fixed_eligible(current):
+                return current, "current"
+            return None, "current_unavailable"
+
+        for account in self.accounts:
+            if self._is_fixed_eligible(account):
+                return account, "fallback_first_available"
+        return None, "no_available_account"
+
+    def fixed_account_report(self, preferred: Optional[str] = None) -> dict:
+        requested = (preferred or get("remote_account") or "current").strip() or "current"
+        account, reason = self.fixed_account_selection(requested)
+        return {
+            "configured": requested,
+            "selected": account.name if account else "",
+            "available": bool(account),
+            "reason": reason,
+            "email": account.email if account else "",
+        }
+
     def bind_session(self, session_key: str, account: "Account") -> None:
         if not session_key or not get("session_affinity_enabled"):
             return
@@ -357,6 +394,10 @@ class AccountPool:
             and bool(account.access_token)
             and not self._quota_limit_reason(account)
         )
+
+    @staticmethod
+    def _is_fixed_eligible(account: "Account") -> bool:
+        return account.enabled and bool(account.access_token)
 
     def _pick_round_robin(self, exclude: set[str]) -> Optional["Account"]:
         for _ in range(len(self.accounts)):
@@ -567,6 +608,12 @@ class AccountPool:
         affinity_hit: Optional[bool] = None,
         first_byte_ms: Optional[float] = None,
         stream_keepalive_count: Optional[int] = None,
+        route_class: str = "",
+        selected_account: str = "",
+        fixed_account: str = "",
+        upstream_path: str = "",
+        ws_close_code: Optional[int] = None,
+        auth_refresh_result: str = "",
     ) -> None:
         self.stats["total_requests"] += 1
         if status == 429:
@@ -601,11 +648,23 @@ class AccountPool:
             row["first_byte_ms"] = round(first_byte_ms, 1)
         if stream_keepalive_count is not None:
             row["stream_keepalive_count"] = int(stream_keepalive_count)
+        if route_class:
+            row["route_class"] = route_class
+        if selected_account:
+            row["selected_account"] = selected_account
+        if fixed_account:
+            row["fixed_account"] = fixed_account
+        if upstream_path:
+            row["upstream_path"] = upstream_path
+        if ws_close_code is not None:
+            row["ws_close_code"] = ws_close_code
+        if auth_refresh_result:
+            row["auth_refresh_result"] = auth_refresh_result
         self.recent_requests.appendleft(row)
         logger.info(
             "request_id=%s account=%s status=%s duration_ms=%.1f retries=%s "
             "stream_mode=%s transport=%s session=%s affinity=%s first_byte_ms=%s "
-            "keepalives=%s path=%s",
+            "keepalives=%s route_class=%s upstream_path=%s path=%s",
             request_id or "-",
             account.name,
             status,
@@ -617,6 +676,8 @@ class AccountPool:
             "-" if affinity_hit is None else affinity_hit,
             "-" if first_byte_ms is None else round(first_byte_ms, 1),
             "-" if stream_keepalive_count is None else stream_keepalive_count,
+            route_class or "-",
+            upstream_path or "-",
             path,
         )
         self._save_recent_requests()

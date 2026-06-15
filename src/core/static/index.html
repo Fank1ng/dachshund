@@ -89,6 +89,8 @@ button:hover{border-color:var(--blue)}
     <div class="card"><div class="num" id="keepalive">-</div><div class="label">SSE 保活 / 首字节重试</div></div>
     <div class="card"><div class="num" id="ws-heartbeat">-</div><div class="label">WebSocket 心跳</div></div>
     <div class="card"><div class="num" id="affinity">-</div><div class="label">会话绑定</div></div>
+    <div class="card"><div class="num" id="remote-mode">-</div><div class="label">远程兼容</div></div>
+    <div class="card"><div class="num" id="remote-account">-</div><div class="label">远程主账号</div></div>
   </section>
 
   <section class="card">
@@ -161,16 +163,20 @@ function renderStatus(status) {
   document.getElementById('keepalive').textContent = `${status.config?.stream_keepalive_seconds ?? '-'}s / ${status.config?.stream_bootstrap_retries ?? '-'}`;
   document.getElementById('ws-heartbeat').textContent = status.config?.websocket_heartbeat_seconds ? `${status.config.websocket_heartbeat_seconds}s` : '关闭';
   document.getElementById('affinity').textContent = status.config?.session_affinity_enabled ? `开 ${status.config?.session_affinity_size ?? 0}` : '关';
+  document.getElementById('remote-mode').textContent = status.remote_proxy_mode === 'fixed_account' ? '固定账号' : (status.remote_proxy_mode || '-');
+  document.getElementById('remote-account').textContent = status.remote_account_selected || status.remote_account || '-';
+  document.getElementById('remote-account').className = status.remote_account_available ? 'num ok' : 'num bad';
   document.getElementById('stream-mode').className = rowsHasBuffered(status.recent_requests || []) ? 'num warn' : 'num ok';
 
   const rows = (status.recent_requests || []).slice(0, 12);
   if (!rows.length) {
     document.getElementById('recent').innerHTML = '<p>暂无请求记录。</p>';
   } else {
-    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>传输</th><th>流</th><th>首字节</th><th>保活</th><th>会话</th><th>路径</th><th>ID</th></tr></thead><tbody>${
+    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>路由</th><th>状态</th><th>传输</th><th>流</th><th>首字节</th><th>保活</th><th>会话</th><th>路径</th><th>ID</th></tr></thead><tbody>${
       rows.map(row => `<tr>
         <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
         <td>${esc(row.account || '-')}</td>
+        <td>${esc(routeLabel(row.route_class))}</td>
         <td>${statusLabel(row.status)}</td>
         <td>${esc(row.transport || '-')}</td>
         <td class="${row.stream_mode === 'hybrid-buffered' ? 'warn' : ''}">${esc(row.stream_mode || '-')}</td>
@@ -437,6 +443,13 @@ function statusLabel(code) {
   const value = Number(code);
   const cls = value >= 500 ? 'bad' : value >= 400 ? 'warn' : 'ok';
   return `<span class="${cls}">${esc(code ?? '-')}</span>`;
+}
+
+function routeLabel(route) {
+  if (route === 'model_pool') return '模型池';
+  if (route === 'remote_fixed') return '远程固定';
+  if (route === 'backend_fixed') return '后台固定';
+  return route || '-';
 }
 
 function accountState(account) {

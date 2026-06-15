@@ -39,6 +39,8 @@ DEFAULTS = {
     "websocket_heartbeat_seconds": 0,
     "session_affinity_enabled": True,
     "session_affinity_ttl_seconds": 3600,
+    "remote_proxy_mode": "fixed_account",
+    "remote_account": "current",
     "quota_weight_5h": 0.5,
     "quota_weight_7d": 0.5,
     "log_level": "INFO",
@@ -144,6 +146,8 @@ def validate(cfg: dict) -> dict:
         "websocket_heartbeat_seconds": int_range("websocket_heartbeat_seconds", 0, 300),
         "session_affinity_enabled": bool_value("session_affinity_enabled"),
         "session_affinity_ttl_seconds": int_range("session_affinity_ttl_seconds", 60, 86400),
+        "remote_proxy_mode": str(merged.get("remote_proxy_mode", DEFAULTS["remote_proxy_mode"])).lower(),
+        "remote_account": str(merged.get("remote_account", DEFAULTS["remote_account"])).strip() or DEFAULTS["remote_account"],
         "quota_weight_5h": float_range("quota_weight_5h", 0, 1),
         "quota_weight_7d": float_range("quota_weight_7d", 0, 1),
         "log_level": str(merged.get("log_level", DEFAULTS["log_level"])).upper(),
@@ -163,6 +167,9 @@ def validate(cfg: dict) -> dict:
 
     if normalized["codex_stream_mode"] not in {"realtime", "buffered", "hybrid"}:
         errors.append("codex_stream_mode must be realtime, buffered, or hybrid")
+
+    if normalized["remote_proxy_mode"] not in {"fixed_account", "off"}:
+        errors.append("remote_proxy_mode must be fixed_account or off")
 
     if normalized["log_level"] not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         errors.append("log_level must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")

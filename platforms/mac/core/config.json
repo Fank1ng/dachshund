@@ -18,6 +18,8 @@
   "websocket_heartbeat_seconds": 0,
   "session_affinity_enabled": true,
   "session_affinity_ttl_seconds": 3600,
+  "remote_proxy_mode": "fixed_account",
+  "remote_account": "current",
   "quota_weight_5h": 0.5,
   "quota_weight_7d": 0.5,
   "log_level": "INFO"

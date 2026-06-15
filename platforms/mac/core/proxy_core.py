@@ -76,6 +76,21 @@ CODEX_COMPLETED_MARKER = b"response.completed"
 WEBSOCKET_HEARTBEAT_SECONDS = 0
 SSE_KEEPALIVE_CHUNK = b": keep-alive\n\n"
 JSON_KEEPALIVE_CHUNK = b"\n"
+ROUTE_MODEL_POOL = "model_pool"
+ROUTE_REMOTE_FIXED = "remote_fixed"
+ROUTE_BACKEND_FIXED = "backend_fixed"
+REMOTE_BACKEND_PREFIXES = (
+    "/backend-api/codex/sessions",
+    "/backend-api/codex/remote",
+    "/backend-api/codex/presence",
+    "/backend-api/codex/devices",
+    "/backend-api/codex/relay",
+    "/backend-api/remote",
+    "/backend-api/presence",
+    "/backend-api/devices",
+    "/backend-api/relay",
+    "/backend-api/connections",
+)
 
 
 class _CodexCompletionTracker:
@@ -195,6 +210,23 @@ def _websocket_target_url(path: str, query_string: str = "") -> str:
 
 def _uses_chatgpt_backend(path: str) -> bool:
     return path.startswith("/backend-api/") or _is_v1_codex_responses_path(path)
+
+
+def _route_class(path: str) -> str:
+    if _is_codex_responses_path(path):
+        return ROUTE_MODEL_POOL
+    if path.startswith(REMOTE_BACKEND_PREFIXES):
+        return ROUTE_REMOTE_FIXED
+    if path.startswith("/backend-api/"):
+        return ROUTE_BACKEND_FIXED
+    return ROUTE_MODEL_POOL
+
+
+def _uses_fixed_backend_account(path: str) -> bool:
+    return (
+        str(get("remote_proxy_mode") or "fixed_account").lower() == "fixed_account"
+        and _route_class(path) in {ROUTE_REMOTE_FIXED, ROUTE_BACKEND_FIXED}
+    )
 
 
 def _is_websocket_request(request: web.Request) -> bool:
@@ -492,6 +524,20 @@ def _upstream_failure_response(
     )
 
 
+def _fixed_account_unavailable_response(request_id: str, path: str, pool: AccountPool) -> web.Response:
+    report = pool.fixed_account_report()
+    return web.json_response(
+        {
+            "error": "remote fixed account unavailable",
+            "request_id": request_id,
+            "path": path,
+            "remote_account": report,
+        },
+        status=503,
+        headers={"x-request-id": request_id},
+    )
+
+
 def _stream_error_detail(
     reason: str,
     error: str,
@@ -697,6 +743,9 @@ async def _relay_realtime_stream(
     session_key: str = "",
     affinity_hit: Optional[bool] = None,
     request_model: str = "",
+    route_class: str = "",
+    fixed_account: str = "",
+    upstream_path: str = "",
 ) -> web.StreamResponse:
     resp = web.StreamResponse(
         status=upstream_resp.status,
@@ -753,6 +802,10 @@ async def _relay_realtime_stream(
             affinity_hit=_public_affinity_hit(session_key, affinity_hit),
             first_byte_ms=first_byte_ms,
             stream_keepalive_count=keepalive_count,
+            route_class=route_class,
+            selected_account=account.name if route_class else "",
+            fixed_account=fixed_account,
+            upstream_path=upstream_path,
         )
         if usage_collector:
             _record_token_usage(
@@ -1049,6 +1102,9 @@ async def _connect_codex_upstream_websocket(
                     transport="websocket",
                     session_key=_public_session_key(session_key),
                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
+                    route_class=ROUTE_MODEL_POOL,
+                    selected_account=account.name,
+                    upstream_path=_codex_upstream_path(path),
                 )
                 if e.status == 401:
                     logger.info("Account %s: websocket got 401, refreshing", account.name)
@@ -1303,6 +1359,10 @@ async def _handle_codex_websocket(
             transport="websocket",
             session_key=_public_session_key(session_key),
             affinity_hit=_public_affinity_hit(session_key, connected.affinity_hit),
+            route_class=ROUTE_MODEL_POOL,
+            selected_account=account.name,
+            upstream_path=_codex_upstream_path(path),
+            ws_close_code=result.close_code,
         )
         _record_token_usage(
             path,
@@ -1367,6 +1427,275 @@ async def _handle_codex_websocket(
     return client_ws
 
 
+async def _handle_fixed_backend_websocket(
+    request: web.Request,
+    pool: AccountPool,
+    upstream_session: aiohttp.ClientSession,
+    request_id: str,
+    path: str,
+) -> web.StreamResponse:
+    route_class = _route_class(path)
+    account = pool.pick_fixed_account()
+    if account is None:
+        return _fixed_account_unavailable_response(request_id, path, pool)
+
+    base_headers = _clean_websocket_headers(dict(request.headers))
+    protocols = _websocket_protocols(dict(request.headers))
+    target_url = _websocket_target_url(path, request.query_string)
+    upstream_path = _codex_upstream_path(path)
+    headers = _account_headers(base_headers, account, upstream_path)
+    auth_refresh_result = ""
+    upstream_ws = None
+    started = time.monotonic()
+
+    for auth_attempt in range(2):
+        try:
+            upstream_ws = await upstream_session.ws_connect(
+                target_url,
+                headers=headers,
+                protocols=protocols,
+                timeout=aiohttp.ClientWSTimeout(
+                    ws_receive=None,
+                    ws_close=int(get("upstream_connect_timeout_sec") or 10),
+                ),
+                receive_timeout=None,
+                autoclose=True,
+                autoping=True,
+                heartbeat=_websocket_heartbeat_seconds(),
+            )
+            break
+        except aiohttp.WSServerHandshakeError as e:
+            if e.status == 401 and auth_attempt == 0:
+                pool.stats["auth_refreshes"] += 1
+                ok = await account.refresh()
+                auth_refresh_result = "success" if ok else "failed"
+                if ok:
+                    headers["Authorization"] = f"Bearer {account.access_token}"
+                    continue
+            duration_ms = (time.monotonic() - started) * 1000
+            pool.record_request(
+                account,
+                path,
+                e.status,
+                duration_ms,
+                0,
+                request_id,
+                transport="websocket",
+                route_class=route_class,
+                selected_account=account.name,
+                fixed_account=account.name,
+                upstream_path=upstream_path,
+                auth_refresh_result=auth_refresh_result,
+            )
+            pool.record_error(
+                path,
+                f"fixed_ws_handshake_failed: status={e.status}; message={e.message}",
+                account,
+                request_id,
+                0,
+            )
+            return web.Response(
+                status=e.status,
+                text=json.dumps({"error": "fixed websocket upstream handshake failed", "status": e.status}),
+                content_type="application/json",
+                headers={"x-request-id": request_id},
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            duration_ms = (time.monotonic() - started) * 1000
+            pool.record_error(path, f"fixed_ws_handshake_failed: {e}", account, request_id, 0)
+            pool.record_request(
+                account,
+                path,
+                502,
+                duration_ms,
+                0,
+                request_id,
+                transport="websocket",
+                route_class=route_class,
+                selected_account=account.name,
+                fixed_account=account.name,
+                upstream_path=upstream_path,
+                auth_refresh_result=auth_refresh_result,
+            )
+            return web.json_response(
+                {"error": "fixed websocket upstream unavailable", "detail": str(e)},
+                status=502,
+                headers={"x-request-id": request_id},
+            )
+
+    client_ws = web.WebSocketResponse(
+        protocols=protocols,
+        heartbeat=_websocket_heartbeat_seconds(),
+    )
+    client_ws.headers["x-request-id"] = request_id
+    try:
+        await client_ws.prepare(request)
+    except (AssertionError, ConnectionResetError, RuntimeError) as e:
+        if upstream_ws is not None:
+            await upstream_ws.close()
+        detail = f"fixed_ws_client_disconnected_before_prepare: {e}"
+        pool.record_error(path, detail, account, request_id, 0)
+        return web.Response(status=499, headers={"x-request-id": request_id})
+
+    try:
+        result = await _relay_websocket_pair(client_ws, upstream_ws)
+    finally:
+        await upstream_ws.close()
+
+    duration_ms = (time.monotonic() - started) * 1000
+    pool.record_request(
+        account,
+        path,
+        101,
+        duration_ms,
+        0,
+        request_id,
+        transport="websocket",
+        route_class=route_class,
+        selected_account=account.name,
+        fixed_account=account.name,
+        upstream_path=upstream_path,
+        ws_close_code=result.close_code,
+        auth_refresh_result=auth_refresh_result,
+    )
+    if result.error:
+        pool.record_error(
+            path,
+            _websocket_error_detail(
+                "fixed_ws_relay_error",
+                result.error,
+                result.messages,
+                result.bytes_forwarded,
+                result.completed,
+                result.close_code,
+            ),
+            account,
+            request_id,
+            0,
+        )
+    await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
+    return client_ws
+
+
+async def _handle_fixed_backend_request(
+    request: web.Request,
+    pool: AccountPool,
+    upstream_session: aiohttp.ClientSession,
+    request_id: str,
+    path: str,
+    target_url: str,
+    body: bytes,
+    base_headers: dict,
+) -> web.Response:
+    route_class = _route_class(path)
+    account = pool.pick_fixed_account()
+    if account is None:
+        return _fixed_account_unavailable_response(request_id, path, pool)
+
+    upstream_path = _codex_upstream_path(path)
+    headers = _account_headers(base_headers, account, upstream_path)
+    transient_retries = int(get("upstream_transient_retries") or 0)
+    auth_refresh_result = ""
+
+    for auth_attempt in range(2):
+        for transient_attempt in range(transient_retries + 1):
+            started = time.monotonic()
+            try:
+                upstream_resp_ctx = upstream_session.request(
+                    request.method,
+                    target_url,
+                    headers=headers,
+                    data=body,
+                    timeout=_upstream_timeout(),
+                )
+                async with upstream_resp_ctx as upstream_resp:
+                    if upstream_resp.status == 401 and auth_attempt == 0:
+                        await upstream_resp.read()
+                        pool.stats["auth_refreshes"] += 1
+                        ok = await account.refresh()
+                        auth_refresh_result = "success" if ok else "failed"
+                        if ok:
+                            headers["Authorization"] = f"Bearer {account.access_token}"
+                            break
+
+                    if not _should_stream_response(path, upstream_resp):
+                        payload = await upstream_resp.read()
+                        duration_ms = (time.monotonic() - started) * 1000
+                        pool.record_request(
+                            account,
+                            path,
+                            upstream_resp.status,
+                            duration_ms,
+                            0,
+                            request_id,
+                            route_class=route_class,
+                            selected_account=account.name,
+                            fixed_account=account.name,
+                            upstream_path=upstream_path,
+                            auth_refresh_result=auth_refresh_result,
+                        )
+                        return web.Response(
+                            status=upstream_resp.status,
+                            body=payload,
+                            headers=_response_headers(upstream_resp, request_id),
+                        )
+
+                    return await _relay_realtime_stream(
+                        request,
+                        pool,
+                        account,
+                        path,
+                        request_id,
+                        0,
+                        upstream_resp,
+                        started,
+                        "",
+                        "http-stream",
+                        False,
+                        int(get("rate_limit_cooldown") or 60),
+                        route_class=route_class,
+                        fixed_account=account.name,
+                        upstream_path=upstream_path,
+                    )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if transient_attempt < transient_retries:
+                    delay = _transient_backoff_seconds(transient_attempt)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    continue
+                duration_ms = (time.monotonic() - started) * 1000
+                pool.record_error(path, f"fixed_backend_error: {e}", account, request_id, 0)
+                pool.record_request(
+                    account,
+                    path,
+                    502,
+                    duration_ms,
+                    0,
+                    request_id,
+                    route_class=route_class,
+                    selected_account=account.name,
+                    fixed_account=account.name,
+                    upstream_path=upstream_path,
+                    auth_refresh_result=auth_refresh_result,
+                )
+                return web.json_response(
+                    {"error": "fixed backend upstream unavailable", "detail": str(e)},
+                    status=502,
+                    headers={"x-request-id": request_id},
+                )
+        else:
+            continue
+        if auth_refresh_result == "success":
+            continue
+        break
+
+    return web.json_response(
+        {"error": "fixed backend auth retry failed", "request_id": request_id},
+        status=502,
+        headers={"x-request-id": request_id},
+    )
+
+
 async def handle(
     request: web.Request,
     pool: AccountPool,
@@ -1399,6 +1728,14 @@ async def _handle_with_session(
             request_id,
             path,
             websocket_session_key,
+        )
+    if _uses_fixed_backend_account(path) and _is_websocket_request(request):
+        return await _handle_fixed_backend_websocket(
+            request,
+            pool,
+            upstream_session,
+            request_id,
+            path,
         )
     if _is_openai_inference_path(path):
         started = time.monotonic()
@@ -1451,6 +1788,18 @@ async def _handle_with_session(
     base_headers = _clean_headers(dict(request.headers))
     base_headers["accept-encoding"] = "identity"
 
+    if _uses_fixed_backend_account(path):
+        return await _handle_fixed_backend_request(
+            request,
+            pool,
+            upstream_session,
+            request_id,
+            path,
+            target_url,
+            body,
+            base_headers,
+        )
+
     cooldown = get("rate_limit_cooldown")
     max_retries = get("max_retries")
     transient_retries = int(get("upstream_transient_retries") or 0)
@@ -1499,6 +1848,9 @@ async def _handle_with_session(
                                     request_id,
                                     session_key=_public_session_key(session_key),
                                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
+                                    route_class=_route_class(path),
+                                    selected_account=account.name,
+                                    upstream_path=_codex_upstream_path(path),
                                 )
                                 retry_after = _retry_after_seconds(upstream_resp.headers.get("Retry-After"))
                                 _record_attempt(
@@ -1556,6 +1908,9 @@ async def _handle_with_session(
                                     request_id,
                                     session_key=_public_session_key(session_key),
                                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
+                                    route_class=_route_class(path),
+                                    selected_account=account.name,
+                                    upstream_path=_codex_upstream_path(path),
                                 )
                                 if 200 <= upstream_resp.status < 300:
                                     _record_token_usage(
@@ -1622,6 +1977,9 @@ async def _handle_with_session(
                                     _http_transport_label(codex_stream_mode),
                                     session_key=_public_session_key(session_key),
                                     affinity_hit=_public_affinity_hit(session_key, affinity_hit),
+                                    route_class=_route_class(path),
+                                    selected_account=account.name,
+                                    upstream_path=_codex_upstream_path(path),
                                 )
                                 usage = (
                                     extract_usage_from_sse_bytes(buffered.body)
@@ -1665,6 +2023,8 @@ async def _handle_with_session(
                                     session_key,
                                     affinity_hit,
                                     request_model,
+                                    route_class=_route_class(path),
+                                    upstream_path=_codex_upstream_path(path),
                                 )
                             except _RetryableStreamError as e:
                                 _record_attempt(
