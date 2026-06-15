@@ -1,4 +1,6 @@
 #import <Cocoa/Cocoa.h>
+#include <math.h>
+#include <string.h>
 
 static NSString *CPString(id value) {
     if (!value || value == NSNull.null) {
@@ -67,6 +69,16 @@ static NSString *CPRelativeTime(id epochValue) {
     return [formatter stringFromDate:date] ?: @"-";
 }
 
+static NSString *CPFullDateTime(id epochValue) {
+    NSTimeInterval epoch = CPDouble(epochValue);
+    if (epoch <= 0) {
+        return @"-";
+    }
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"yyyy-MM-dd HH:mm";
+    return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:epoch]] ?: @"-";
+}
+
 static NSDate *CPDateFromString(NSString *dateString) {
     if (!dateString.length) {
         return nil;
@@ -112,6 +124,18 @@ static NSString *CPExactTokenCount(id value) {
     return [NSString stringWithFormat:@"%.0f", CPDouble(value)];
 }
 
+static NSString *CPCompactTokenCount(id value) {
+    double n = CPDouble(value);
+    double absValue = fabs(n);
+    if (absValue >= 1000000) {
+        return [NSString stringWithFormat:@"%.1fM", n / 1000000.0];
+    }
+    if (absValue >= 1000) {
+        return [NSString stringWithFormat:@"%.1fK", n / 1000.0];
+    }
+    return CPExactTokenCount(value);
+}
+
 static NSString *CPTokenUsagePeriodLabel(NSDictionary *row) {
     NSString *period = CPString(row[@"period_label"]);
     if (period.length) {
@@ -143,11 +167,11 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     NSString *activeText = activeDays > 0 ? [NSString stringWithFormat:@"\n使用天数 %ld / 7", (long)activeDays] : @"";
     return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\n缓存 %@\n推理 %@\n请求 %ld · 已知 %ld · 未知 %ld%@\n本地代理捕获口径",
             CPTokenUsagePeriodLabel(row),
-            CPExactTokenCount(row[@"total_tokens"]),
-            CPExactTokenCount(row[@"input_tokens"]),
-            CPExactTokenCount(row[@"output_tokens"]),
-            cacheObserved ? CPExactTokenCount(@(cacheTokens)) : @"-",
-            reasoningObserved ? CPExactTokenCount(row[@"reasoning_tokens"]) : @"-",
+            CPCompactTokenCount(row[@"total_tokens"]),
+            CPCompactTokenCount(row[@"input_tokens"]),
+            CPCompactTokenCount(row[@"output_tokens"]),
+            cacheObserved ? CPCompactTokenCount(@(cacheTokens)) : @"-",
+            reasoningObserved ? CPCompactTokenCount(row[@"reasoning_tokens"]) : @"-",
             (long)requests,
             (long)known,
             (long)unknown,
@@ -188,6 +212,22 @@ static NSColor *CPSidebarBorderColor(void) {
     return CPDynamicAquaColor(@"CPSidebarBorderColor",
                              [NSColor colorWithCalibratedWhite:0.00 alpha:0.18],
                              [NSColor colorWithCalibratedWhite:1.00 alpha:0.16]);
+}
+
+static NSColor *CPSettingsContentBackgroundColor(void) {
+    return CPDynamicAquaColor(@"CPSettingsContentBackgroundColor",
+                             [NSColor colorWithCalibratedWhite:0.985 alpha:1.0],
+                             [NSColor colorWithCalibratedWhite:0.095 alpha:1.0]);
+}
+
+static NSColor *CPSettingsHeaderBackgroundColor(void) {
+    return CPDynamicAquaColor(@"CPSettingsHeaderBackgroundColor",
+                             [NSColor colorWithCalibratedWhite:0.985 alpha:1.0],
+                             [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]);
+}
+
+static NSNumber *CPJSONBool(BOOL value) {
+    return [NSNumber numberWithBool:value];
 }
 
 static NSImage *CPMenuBarIconImage(void) {
@@ -238,6 +278,7 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, strong) NSDictionary *configSnapshot;
 @property(nonatomic, strong) NSDictionary *statusSnapshot;
 @property(nonatomic, strong) NSDictionary *codexSnapshot;
+@property(nonatomic, strong) NSDictionary *menubarLoginSnapshot;
 @property(nonatomic, strong) NSTextField *statusLabel;
 @property(nonatomic, strong) NSTextField *serviceLabel;
 @property(nonatomic, strong) NSTextField *codexLabel;
@@ -280,6 +321,8 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, strong) NSView *contentHost;
 @property(nonatomic, strong) NSButton *restoreDefaultsButton;
 @property(nonatomic, strong) NSButton *saveSettingsButton;
+@property(nonatomic, strong) NSButton *menuBarLoginItemControl;
+@property(nonatomic, strong) NSTextField *menuBarLoginItemLabel;
 @property(nonatomic, strong) NSMutableArray<NSButton *> *settingsNavButtons;
 @property(nonatomic, strong) NSMutableArray<NSImageView *> *settingsNavIconViews;
 @property(nonatomic, strong) NSMutableArray<NSTextField *> *settingsNavTitleLabels;
@@ -288,6 +331,8 @@ static NSImage *CPMenuBarIconImage(void) {
 - (instancetype)initWithOwner:(ControlWindowController *)owner;
 - (void)show;
 - (void)refresh:(id)sender;
+- (void)rebuildSettingsPagesSelectingIndex:(NSInteger)selected;
+- (void)populateControls;
 @end
 
 @interface ControlWindowController : NSObject <NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
@@ -355,6 +400,7 @@ static NSImage *CPMenuBarIconImage(void) {
 - (NSView *)tokenStatsCard;
 - (NSView *)tokenBarChartCard;
 - (NSView *)tokenHeatmapCard;
+- (NSButton *)tokenHeatmapModeButtonWithTitle:(NSString *)title tag:(NSInteger)tag;
 - (NSView *)recentRequestsCard;
 - (NSView *)accountManagementCard;
 - (NSView *)accountQuickActionsCard;
@@ -928,15 +974,18 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (void)buildSidebarInView:(NSView *)sidebar {
-    CPThemedView *panel = [[CPThemedView alloc] init];
+    NSVisualEffectView *panel = [[NSVisualEffectView alloc] init];
     panel.translatesAutoresizingMaskIntoConstraints = NO;
     panel.wantsLayer = YES;
+    panel.material = NSVisualEffectMaterialSidebar;
+    panel.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    panel.state = NSVisualEffectStateActive;
     panel.layer.cornerRadius = 14;
     panel.layer.masksToBounds = NO;
-    panel.cpBackgroundColor = CPSidebarPanelBackgroundColor();
-    panel.cpBorderColor = CPSidebarBorderColor();
+    panel.layer.backgroundColor = [CPSidebarPanelBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
+    panel.layer.borderColor = [CPSidebarBorderColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
     panel.layer.borderWidth = 0.6;
-    panel.cpShadowColor = NSColor.blackColor;
+    panel.layer.shadowColor = NSColor.blackColor.CGColor;
     panel.layer.shadowOpacity = 0.08;
     panel.layer.shadowOffset = CGSizeMake(0, -1);
     panel.layer.shadowRadius = 8;
@@ -1880,10 +1929,15 @@ static NSImage *CPMenuBarIconImage(void) {
     [header addArrangedSubview:accountLabel];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    NSString *refreshText = latestFetched > 0 ? [NSString stringWithFormat:@"刷新 %@", CPRelativeTime(@(latestFetched))] : @"未刷新";
-    [header addArrangedSubview:[self labelWithText:refreshText
-                                             font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]
-                                            color:NSColor.secondaryLabelColor]];
+    NSString *refreshText = latestFetched > 0 ? [NSString stringWithFormat:@"刷新\n%@", CPFullDateTime(@(latestFetched))] : @"未刷新";
+    NSTextField *refreshLabel = [self labelWithText:refreshText
+                                               font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]
+                                              color:NSColor.secondaryLabelColor];
+    refreshLabel.alignment = NSTextAlignmentRight;
+    refreshLabel.maximumNumberOfLines = 2;
+    refreshLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [refreshLabel.widthAnchor constraintEqualToConstant:126].active = YES;
+    [header addArrangedSubview:refreshLabel];
     [stack addArrangedSubview:header];
 
     [stack addArrangedSubview:[self quotaLaneWithTitle:@"5h 剩余"
@@ -1908,7 +1962,7 @@ static NSImage *CPMenuBarIconImage(void) {
     NSTextField *titleLabel = [self labelWithText:title ?: @"额度"
                                              font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                                             color:NSColor.secondaryLabelColor];
-    [titleLabel.widthAnchor constraintEqualToConstant:54].active = YES;
+    [titleLabel.widthAnchor constraintEqualToConstant:60].active = YES;
     [row addArrangedSubview:titleLabel];
 
     NSProgressIndicator *bar = [[NSProgressIndicator alloc] init];
@@ -1928,7 +1982,7 @@ static NSImage *CPMenuBarIconImage(void) {
     caption.alignment = NSTextAlignmentRight;
     caption.maximumNumberOfLines = 1;
     caption.lineBreakMode = NSLineBreakByTruncatingTail;
-    [caption.widthAnchor constraintEqualToConstant:96].active = YES;
+    [caption.widthAnchor constraintEqualToConstant:118].active = YES;
     [row addArrangedSubview:caption];
     return row;
 }
@@ -2032,43 +2086,61 @@ static NSImage *CPMenuBarIconImage(void) {
 - (NSView *)tokenHeatmapCard {
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
+    stack.alignment = NSLayoutAttributeWidth;
     stack.spacing = 8;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack.heightAnchor constraintEqualToConstant:104].active = YES;
+    [stack.heightAnchor constraintEqualToConstant:154].active = YES;
 
     NSStackView *header = [[NSStackView alloc] init];
     header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     header.alignment = NSLayoutAttributeCenterY;
+    header.spacing = 4;
     [header addArrangedSubview:[self labelWithText:@"Token 活动" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
-    NSView *flex = [[NSView alloc] init];
-    [header addArrangedSubview:flex];
-    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
-    control.segmentCount = 3;
-    [control setLabel:@"每日" forSegment:0];
-    [control setLabel:@"每周" forSegment:1];
-    [control setLabel:@"累计" forSegment:2];
-    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
-    control.selectedSegment = MAX(0, MIN(2, self.tokenUsageMode));
-    control.target = self;
-    control.action = @selector(tokenUsageModeAction:);
-    control.controlSize = NSControlSizeSmall;
-    control.segmentStyle = NSSegmentStyleSeparated;
-    control.translatesAutoresizingMaskIntoConstraints = NO;
-    [control.widthAnchor constraintEqualToConstant:142].active = YES;
-    [header addArrangedSubview:control];
+    [header addArrangedSubview:[[NSView alloc] init]];
     [stack addArrangedSubview:header];
+
+    NSStackView *body = [[NSStackView alloc] init];
+    body.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    body.alignment = NSLayoutAttributeTop;
+    body.spacing = 10;
+    body.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSStackView *modes = [[NSStackView alloc] init];
+    modes.orientation = NSUserInterfaceLayoutOrientationVertical;
+    modes.alignment = NSLayoutAttributeWidth;
+    modes.spacing = 6;
+    modes.translatesAutoresizingMaskIntoConstraints = NO;
+    [modes.widthAnchor constraintEqualToConstant:58].active = YES;
+    [modes addArrangedSubview:[self tokenHeatmapModeButtonWithTitle:@"每日" tag:0]];
+    [modes addArrangedSubview:[self tokenHeatmapModeButtonWithTitle:@"每周" tag:1]];
+    [modes addArrangedSubview:[self tokenHeatmapModeButtonWithTitle:@"累计" tag:2]];
+    [body addArrangedSubview:modes];
 
     CPHeatmapView *heatmap = [[CPHeatmapView alloc] init];
     heatmap.rows = [self tokenUsageHeatmapRows];
-    heatmap.cellMaxSize = 7;
+    heatmap.cellMaxSize = 11;
     heatmap.cellMinSize = 5;
     heatmap.cellGap = 2;
     heatmap.monthLabelFontSize = 10;
     heatmap.translatesAutoresizingMaskIntoConstraints = NO;
-    [heatmap.heightAnchor constraintEqualToConstant:68].active = YES;
-    [stack addArrangedSubview:heatmap];
+    [heatmap.heightAnchor constraintEqualToConstant:104].active = YES;
+    [body addArrangedSubview:heatmap];
+    [heatmap.widthAnchor constraintEqualToAnchor:body.widthAnchor constant:-68].active = YES;
+    [stack addArrangedSubview:body];
     return stack;
+}
+
+- (NSButton *)tokenHeatmapModeButtonWithTitle:(NSString *)title tag:(NSInteger)tag {
+    NSButton *button = [NSButton buttonWithTitle:title target:self action:@selector(tokenUsageModeAction:)];
+    [button setButtonType:NSButtonTypeToggle];
+    button.tag = tag;
+    button.bezelStyle = NSBezelStyleRounded;
+    button.controlSize = NSControlSizeSmall;
+    button.font = [NSFont systemFontOfSize:12 weight:tag == self.tokenUsageMode ? NSFontWeightSemibold : NSFontWeightRegular];
+    button.state = tag == self.tokenUsageMode ? NSControlStateValueOn : NSControlStateValueOff;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button.heightAnchor constraintEqualToConstant:28].active = YES;
+    return button;
 }
 
 - (NSView *)tokenEventHeaderRow {
@@ -3396,9 +3468,21 @@ static NSImage *CPMenuBarIconImage(void) {
     [self performAction:@[@"repair-open-web"] label:@"打开网页状态页" refreshAfter:YES fromBundle:YES];
 }
 
-- (void)tokenUsageModeAction:(NSSegmentedControl *)sender {
-    self.tokenUsageMode = MAX(0, MIN(2, sender.selectedSegment));
-    [self renderActiveSection];
+- (void)tokenUsageModeAction:(NSControl *)sender {
+    NSInteger mode = 0;
+    if ([sender isKindOfClass:NSSegmentedControl.class]) {
+        mode = ((NSSegmentedControl *)sender).selectedSegment;
+    } else {
+        mode = sender.tag;
+    }
+    self.tokenUsageMode = MAX(0, MIN(2, mode));
+    if (self.window) {
+        [self renderActiveSection];
+    }
+    if (self.settingsController.window) {
+        [self.settingsController rebuildSettingsPagesSelectingIndex:self.settingsController.selectedSettingsIndex];
+        [self.settingsController populateControls];
+    }
 }
 
 - (void)scanAccountsAction:(id)sender {
@@ -4074,11 +4158,9 @@ static NSImage *CPMenuBarIconImage(void) {
         [header addArrangedSubview:[self labelWithText:@"选中账号" font:[NSFont systemFontOfSize:15 weight:NSFontWeightBold] color:NSColor.labelColor]];
         [self.inspectorStack addArrangedSubview:header];
 
-        NSString *summary = [NSString stringWithFormat:@"%@ · %@ · %@ · %@",
+        NSString *summary = [NSString stringWithFormat:@"%@ · %@",
                              name,
-                             [self stateLabelForAccount:account],
-                             [self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO],
-                             [self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]];
+                             [self stateLabelForAccount:account]];
         NSTextField *summaryLabel = [self labelWithText:summary font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
         summaryLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         [self.inspectorStack addArrangedSubview:summaryLabel];
@@ -4088,7 +4170,9 @@ static NSImage *CPMenuBarIconImage(void) {
         [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"邮箱" value:CPDisplayString(account[@"email"])]];
         [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"Token" value:CPRelativeTime(account[@"expires_at"])]];
         [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"5h 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
+        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"5h 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
         [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"7d 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
+        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"7d 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
 
         NSStackView *buttonGrid = [[NSStackView alloc] init];
         buttonGrid.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -4208,10 +4292,7 @@ static NSImage *CPMenuBarIconImage(void) {
     if (fetchedAt <= 0) {
         return @"未刷新";
     }
-    NSDate *date = [NSDate dateWithTimeIntervalSince1970:fetchedAt];
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"MM-dd HH:mm";
-    return [NSString stringWithFormat:@"刷新 %@", [formatter stringFromDate:date] ?: @"-"];
+    return [NSString stringWithFormat:@"刷新 %@", CPFullDateTime(@(fetchedAt))];
 }
 
 - (NSString *)quotaResetTextForAccountName:(NSString *)name weekly:(BOOL)weekly {
@@ -4230,10 +4311,7 @@ static NSImage *CPMenuBarIconImage(void) {
     if (resetAt <= 0) {
         return [NSString stringWithFormat:@"%@未刷新", prefix];
     }
-    NSDate *date = [NSDate dateWithTimeIntervalSince1970:resetAt];
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"MM-dd HH:mm";
-    return [NSString stringWithFormat:@"%@刷新 %@", prefix, [formatter stringFromDate:date] ?: @"-"];
+    return [NSString stringWithFormat:@"%@刷新 %@", prefix, CPFullDateTime(@(resetAt))];
 }
 
 - (NSString *)requestTimeText:(id)value {
@@ -4318,6 +4396,7 @@ static NSImage *CPMenuBarIconImage(void) {
     _configSnapshot = @{};
     _statusSnapshot = @{};
     _codexSnapshot = @{};
+    _menubarLoginSnapshot = @{};
     _selectedSettingsIndex = 0;
     return self;
 }
@@ -4401,6 +4480,8 @@ static NSImage *CPMenuBarIconImage(void) {
     self.contentHost = nil;
     self.restoreDefaultsButton = nil;
     self.saveSettingsButton = nil;
+    self.menuBarLoginItemControl = nil;
+    self.menuBarLoginItemLabel = nil;
     self.settingsNavButtons = [NSMutableArray array];
     self.settingsNavIconViews = [NSMutableArray array];
     self.settingsNavTitleLabels = [NSMutableArray array];
@@ -4416,13 +4497,14 @@ static NSImage *CPMenuBarIconImage(void) {
     self.window.title = @"控制中心";
     self.window.titleVisibility = NSWindowTitleHidden;
     self.window.titlebarAppearsTransparent = YES;
+    self.window.opaque = YES;
     self.window.restorable = NO;
     self.window.contentMinSize = NSMakeSize(940, 620);
     self.window.contentMaxSize = NSMakeSize(940, 620);
     self.window.minSize = self.window.frame.size;
     self.window.maxSize = self.window.frame.size;
     [self.window standardWindowButton:NSWindowZoomButton].enabled = NO;
-    self.window.backgroundColor = CPSidebarPanelBackgroundColor();
+    self.window.backgroundColor = CPSettingsContentBackgroundColor();
     self.window.delegate = self;
     [self.window center];
 
@@ -4440,7 +4522,7 @@ static NSImage *CPMenuBarIconImage(void) {
 
     CPThemedView *detailPanel = [[CPThemedView alloc] init];
     detailPanel.wantsLayer = YES;
-    detailPanel.cpBackgroundColor = NSColor.textBackgroundColor;
+    detailPanel.cpBackgroundColor = CPSettingsContentBackgroundColor();
     detailPanel.cpBorderColor = NSColor.clearColor;
     detailPanel.layer.borderWidth = 0;
     detailPanel.layer.cornerRadius = 16;
@@ -4471,6 +4553,8 @@ static NSImage *CPMenuBarIconImage(void) {
     [header.heightAnchor constraintEqualToConstant:48].active = YES;
 
     self.contentHost = [[NSView alloc] init];
+    self.contentHost.wantsLayer = YES;
+    self.contentHost.layer.backgroundColor = [CPSettingsContentBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
     self.contentHost.translatesAutoresizingMaskIntoConstraints = NO;
     [detail addArrangedSubview:self.contentHost];
 
@@ -4481,6 +4565,8 @@ static NSImage *CPMenuBarIconImage(void) {
     buttons.alignment = NSLayoutAttributeCenterY;
     buttons.spacing = 8;
     buttons.edgeInsets = NSEdgeInsetsMake(6, 14, 6, 14);
+    buttons.wantsLayer = YES;
+    buttons.layer.backgroundColor = [CPSettingsContentBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
     self.statusLabel = [self detailLabel:@"控制中心已打开"];
     self.statusLabel.maximumNumberOfLines = 1;
     self.statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -4555,6 +4641,8 @@ static NSImage *CPMenuBarIconImage(void) {
     self.contentHost = nil;
     self.restoreDefaultsButton = nil;
     self.saveSettingsButton = nil;
+    self.menuBarLoginItemControl = nil;
+    self.menuBarLoginItemLabel = nil;
     self.settingsNavButtons = [NSMutableArray array];
     self.settingsNavIconViews = [NSMutableArray array];
     self.settingsNavTitleLabels = [NSMutableArray array];
@@ -4588,6 +4676,8 @@ static NSImage *CPMenuBarIconImage(void) {
     self.proxyVersionLabel = nil;
     self.manifestLabel = nil;
     self.proxyModeControl = nil;
+    self.menuBarLoginItemControl = nil;
+    self.menuBarLoginItemLabel = nil;
 }
 
 - (void)rebuildSettingsPagesSelectingIndex:(NSInteger)selected {
@@ -4627,9 +4717,12 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (NSView *)settingsSidebarView {
-    CPThemedView *sidebar = [[CPThemedView alloc] init];
+    NSVisualEffectView *sidebar = [[NSVisualEffectView alloc] init];
+    sidebar.material = NSVisualEffectMaterialSidebar;
+    sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    sidebar.state = NSVisualEffectStateActive;
     sidebar.wantsLayer = YES;
-    sidebar.cpBackgroundColor = CPSidebarPanelBackgroundColor();
+    sidebar.layer.backgroundColor = [CPSidebarPanelBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSStackView *stack = [[NSStackView alloc] init];
@@ -4751,8 +4844,7 @@ static NSImage *CPMenuBarIconImage(void) {
     self.selectedSettingsIndex = selected;
     for (NSInteger i = 0; i < (NSInteger)self.scrollViews.count; i++) {
         NSScrollView *scroll = self.scrollViews[i];
-        scroll.hidden = NO;
-        if (i == 0) {
+        if (!scroll.hidden) {
             [self scrollViewToTop:scroll];
         }
     }
@@ -5080,6 +5172,16 @@ static NSImage *CPMenuBarIconImage(void) {
         [self boolRow:@"Session affinity" key:@"session_affinity_enabled"],
         [self integerRow:@"Affinity TTL（秒）" key:@"session_affinity_ttl_seconds" min:60 max:86400],
     ]];
+    self.menuBarLoginItemControl = [NSButton checkboxWithTitle:@"登录后自动常驻菜单栏" target:nil action:nil];
+    self.menuBarLoginItemControl.translatesAutoresizingMaskIntoConstraints = NO;
+    self.menuBarLoginItemLabel = [self detailLabel:@"正在读取菜单栏登录项..."];
+    NSView *startup = [self settingsSectionWithTitle:@"启动与菜单栏"
+                                             summary:nil
+                                               views:@[
+        [self rowWithTitle:@"菜单栏" control:self.menuBarLoginItemControl],
+        [self compactInfoRowWithTitle:@"状态" label:self.menuBarLoginItemLabel],
+        [self settingsNoteLabel:@"手动打开 App 会显示控制中心；登录项启动只常驻菜单栏，不主动弹窗。"],
+    ]];
     self.advancedRestartImpactLabel = [self detailLabel:@"-"];
     self.advancedStreamImpactLabel = [self detailLabel:@"-"];
     self.advancedSessionImpactLabel = [self detailLabel:@"-"];
@@ -5103,6 +5205,7 @@ static NSImage *CPMenuBarIconImage(void) {
     ]];
     NSStackView *impactSide = [self baseStack];
     impactSide.spacing = 8;
+    [impactSide addArrangedSubview:startup];
     [impactSide addArrangedSubview:impact];
     [impactSide addArrangedSubview:troubleshoot];
     [stack addArrangedSubview:[self settingsTwoColumnWithLeft:behavior right:network]];
@@ -5186,7 +5289,11 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (NSView *)settingsPaneHeaderWithTitle:(NSString *)title subtitle:(NSString *)subtitle {
-    NSView *header = [[NSView alloc] init];
+    CPThemedView *header = [[CPThemedView alloc] init];
+    header.wantsLayer = YES;
+    header.cpBackgroundColor = CPSettingsHeaderBackgroundColor();
+    header.cpBorderColor = NSColor.clearColor;
+    header.layer.borderWidth = 0;
     header.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSStackView *textStack = [[NSStackView alloc] init];
@@ -5305,8 +5412,8 @@ static NSImage *CPMenuBarIconImage(void) {
 - (NSStackView *)compactInfoRowWithTitle:(NSString *)title label:(NSTextField *)valueLabel {
     valueLabel.textColor = NSColor.secondaryLabelColor;
     valueLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
-    valueLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    valueLabel.maximumNumberOfLines = 1;
+    valueLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    valueLabel.maximumNumberOfLines = 2;
     [valueLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     return [self rowWithTitle:title control:valueLabel];
 }
@@ -5519,12 +5626,47 @@ static NSImage *CPMenuBarIconImage(void) {
     };
 }
 
+- (NSDictionary *)fieldLabels {
+    return @{
+        @"port": @"代理端口",
+        @"rate_limit_cooldown": @"限流冷却",
+        @"rotation_strategy": @"选择策略",
+        @"product_mode": @"产品模式",
+        @"max_retries": @"最大重试",
+        @"quota_refresh_interval": @"额度刷新间隔",
+        @"quota_tracker_enabled": @"自动刷新额度",
+        @"max_request_body_mb": @"请求上限 MB",
+        @"upstream_connect_timeout_sec": @"连接超时",
+        @"upstream_transient_retries": @"瞬时重试",
+        @"upstream_transient_backoff_ms": @"退避（ms）",
+        @"codex_stream_mode": @"流模式",
+        @"codex_hybrid_probe_seconds": @"探测秒",
+        @"codex_hybrid_probe_bytes": @"探测 bytes",
+        @"codex_stream_retry_cooldown": @"流重试冷却",
+        @"stream_keepalive_seconds": @"Stream keepalive",
+        @"stream_bootstrap_retries": @"Bootstrap retries",
+        @"nonstream_keepalive_interval": @"Nonstream keepalive",
+        @"websocket_heartbeat_seconds": @"WebSocket heartbeat",
+        @"session_affinity_enabled": @"Session affinity",
+        @"session_affinity_ttl_seconds": @"Affinity TTL",
+        @"quota_weight_5h": @"5h 权重",
+        @"quota_weight_7d": @"7d 权重",
+        @"log_level": @"日志级别",
+    };
+}
+
+- (NSString *)labelForConfigKey:(NSString *)key {
+    NSString *label = CPString([self fieldLabels][key]);
+    return label.length ? label : key;
+}
+
 - (void)refresh:(id)sender {
     self.statusLabel.stringValue = @"正在读取设置...";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *config = [self fetchJSONPath:@"/api/config" method:@"GET" body:nil timeout:3.0];
         NSDictionary *status = [self.owner fetchJSONPath:@"/api/status" method:@"GET" timeout:3.0];
         NSDictionary *codex = [self.owner fetchJSONPath:@"/api/codex/proxy" method:@"GET" timeout:3.0];
+        NSDictionary *menubar = [self.owner runPythonJSONSync:@[@"menubar-login-status"] rawText:nil];
         NSDictionary *ownerPayload = [self.owner snapshotPayloadRefreshingQuota:YES
                                                              quotaRefreshResult:nil
                                                                     proxyOnline:nil];
@@ -5549,6 +5691,7 @@ static NSImage *CPMenuBarIconImage(void) {
             self.configSnapshot = config ?: @{};
             self.statusSnapshot = status ?: @{};
             self.codexSnapshot = codex ?: @{};
+            self.menubarLoginSnapshot = menubar ?: @{};
             NSInteger selected = self.selectedSettingsIndex;
             [self rebuildSettingsPagesSelectingIndex:selected];
             [self populateControls];
@@ -5719,9 +5862,21 @@ static NSImage *CPMenuBarIconImage(void) {
         : @"关闭，会按策略重新选择账号";
     self.advancedSaveImpactLabel.stringValue = running ? @"保存后尝试热应用" : @"后台离线时写入本地配置";
     self.advancedSaveImpactLabel.textColor = running ? NSColor.labelColor : NSColor.systemOrangeColor;
+    if (self.menuBarLoginItemControl) {
+        BOOL menubarEnabled = CPBool(self.menubarLoginSnapshot[@"enabled"]);
+        self.menuBarLoginItemControl.state = menubarEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if (self.menuBarLoginItemLabel) {
+        BOOL menubarEnabled = CPBool(self.menubarLoginSnapshot[@"enabled"]);
+        NSString *plist = CPString(self.menubarLoginSnapshot[@"plist_path"]);
+        self.menuBarLoginItemLabel.stringValue = menubarEnabled
+            ? @"已开启；登录后会常驻菜单栏，不主动弹出控制中心"
+            : (plist.length ? @"未开启；登录后不会自动显示菜单栏入口" : @"未开启");
+        self.menuBarLoginItemLabel.textColor = menubarEnabled ? NSColor.labelColor : NSColor.secondaryLabelColor;
+    }
 }
 
-- (NSDictionary *)configFromControls {
+- (NSDictionary *)configFromControlsWithError:(NSString **)errorMessage {
     NSMutableDictionary *updates = [NSMutableDictionary dictionary];
     NSDictionary *types = [self fieldTypes];
     for (NSString *key in self.controls) {
@@ -5730,20 +5885,83 @@ static NSImage *CPMenuBarIconImage(void) {
         if ([control isKindOfClass:NSPopUpButton.class]) {
             updates[key] = CPDisplayString(((NSPopUpButton *)control).selectedItem.representedObject);
         } else if ([control isKindOfClass:NSButton.class] || [type isEqualToString:@"bool"]) {
-            updates[key] = @(((NSButton *)control).state == NSControlStateValueOn);
+            updates[key] = CPJSONBool(((NSButton *)control).state == NSControlStateValueOn);
         } else if ([type isEqualToString:@"float"]) {
-            updates[key] = @(((NSTextField *)control).doubleValue);
+            NSTextField *field = (NSTextField *)control;
+            NSString *raw = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSNumberFormatter *formatter = [field.formatter isKindOfClass:NSNumberFormatter.class] ? (NSNumberFormatter *)field.formatter : nil;
+            NSNumber *number = raw.length ? [formatter numberFromString:raw] : nil;
+            if (!number) {
+                if (errorMessage) {
+                    *errorMessage = [NSString stringWithFormat:@"%@ 必须填写数字。", [self labelForConfigKey:key]];
+                }
+                return nil;
+            }
+            double value = number.doubleValue;
+            if ((formatter.minimum && value < formatter.minimum.doubleValue) || (formatter.maximum && value > formatter.maximum.doubleValue)) {
+                if (errorMessage) {
+                    *errorMessage = [NSString stringWithFormat:@"%@ 必须在 %.3g 到 %.3g 之间。", [self labelForConfigKey:key], formatter.minimum.doubleValue, formatter.maximum.doubleValue];
+                }
+                return nil;
+            }
+            updates[key] = @(value);
         } else {
-            updates[key] = @((NSInteger)llround(((NSTextField *)control).doubleValue));
+            NSTextField *field = (NSTextField *)control;
+            NSString *raw = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSNumberFormatter *formatter = [field.formatter isKindOfClass:NSNumberFormatter.class] ? (NSNumberFormatter *)field.formatter : nil;
+            NSNumber *number = raw.length ? [formatter numberFromString:raw] : nil;
+            if (!number) {
+                if (errorMessage) {
+                    *errorMessage = [NSString stringWithFormat:@"%@ 必须填写整数。", [self labelForConfigKey:key]];
+                }
+                return nil;
+            }
+            double value = number.doubleValue;
+            double rounded = round(value);
+            if (fabs(value - rounded) > 0.000001) {
+                if (errorMessage) {
+                    *errorMessage = [NSString stringWithFormat:@"%@ 必须是整数。", [self labelForConfigKey:key]];
+                }
+                return nil;
+            }
+            if ((formatter.minimum && value < formatter.minimum.doubleValue) || (formatter.maximum && value > formatter.maximum.doubleValue)) {
+                if (errorMessage) {
+                    *errorMessage = [NSString stringWithFormat:@"%@ 必须在 %.0f 到 %.0f 之间。", [self labelForConfigKey:key], formatter.minimum.doubleValue, formatter.maximum.doubleValue];
+                }
+                return nil;
+            }
+            updates[key] = @((NSInteger)llround(value));
         }
+    }
+    if (updates[@"quota_tracker_enabled"]) {
+        updates[@"quota_tracker_user_set"] = CPJSONBool(YES);
+    }
+    if (updates[@"codex_stream_mode"]) {
+        updates[@"codex_stream_mode_user_set"] = CPJSONBool(YES);
+    }
+    if (updates[@"quota_weight_5h"] && updates[@"quota_weight_7d"] && CPDouble(updates[@"quota_weight_5h"]) + CPDouble(updates[@"quota_weight_7d"]) <= 0) {
+        if (errorMessage) {
+            *errorMessage = @"5h 权重和 7d 权重不能同时为 0。";
+        }
+        return nil;
     }
     return updates;
 }
 
 - (void)save:(id)sender {
-    NSDictionary *updates = [self configFromControls];
-    BOOL desiredProxy = self.proxyModeControl.selectedSegment != 1;
+    NSString *validationError = nil;
+    NSDictionary *updates = [self configFromControlsWithError:&validationError];
+    if (!updates) {
+        self.statusLabel.stringValue = [NSString stringWithFormat:@"保存失败：%@", validationError ?: @"配置输入无效"];
+        [self.owner appendLog:[NSString stringWithFormat:@"设置保存失败\n%@", validationError ?: @"配置输入无效"]];
+        return;
+    }
+    BOOL canChangeProxyMode = self.selectedSettingsIndex == 3 && self.proxyModeControl != nil;
+    BOOL desiredProxy = canChangeProxyMode ? self.proxyModeControl.selectedSegment != 1 : NO;
     BOOL currentProxy = CPBool(self.codexSnapshot[@"enabled"]) || CPBool(self.statusSnapshot[@"enabled"]);
+    BOOL canChangeMenuBarLogin = self.selectedSettingsIndex == 4 && self.menuBarLoginItemControl != nil;
+    BOOL desiredMenuBarLogin = canChangeMenuBarLogin ? self.menuBarLoginItemControl.state == NSControlStateValueOn : NO;
+    BOOL currentMenuBarLogin = CPBool(self.menubarLoginSnapshot[@"enabled"]);
     self.statusLabel.stringValue = @"正在保存设置...";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *jsonError = nil;
@@ -5759,13 +5977,19 @@ static NSImage *CPMenuBarIconImage(void) {
         }
 
         NSDictionary *proxyResult = nil;
-        if (desiredProxy != currentProxy) {
-            NSData *proxyBody = [NSJSONSerialization dataWithJSONObject:@{@"enabled": @(desiredProxy)} options:0 error:nil];
+        if (canChangeProxyMode && desiredProxy != currentProxy) {
+            NSData *proxyBody = [NSJSONSerialization dataWithJSONObject:@{@"enabled": CPJSONBool(desiredProxy)} options:0 error:nil];
             proxyResult = [self fetchJSONPath:@"/api/codex/proxy" method:@"PUT" body:proxyBody timeout:5.0];
             if (!proxyResult || proxyResult[@"error"]) {
                 NSString *raw = nil;
                 proxyResult = [self.owner runPythonJSONSync:@[desiredProxy ? @"enable-codex-proxy" : @"disable-codex-proxy"] rawText:&raw];
             }
+        }
+
+        NSDictionary *menubarResult = nil;
+        if (canChangeMenuBarLogin && desiredMenuBarLogin != currentMenuBarLogin) {
+            NSString *raw = nil;
+            menubarResult = [self.owner runPythonJSONSync:@[desiredMenuBarLogin ? @"enable-menubar-login" : @"disable-menubar-login"] rawText:&raw];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -5777,10 +6001,15 @@ static NSImage *CPMenuBarIconImage(void) {
             }
             BOOL restartRequired = CPBool(result[@"restart_required"]);
             NSString *proxyError = CPString(proxyResult[@"error"]);
-            self.statusLabel.stringValue = proxyError.length
-                ? [NSString stringWithFormat:@"设置已保存，代理模式切换失败：%@", proxyError]
-                : (restartRequired ? @"设置已保存；端口变更需要重启后台生效" : @"设置已保存");
-            [self.owner appendLog:[NSString stringWithFormat:@"设置保存\n%@\n%@", CPPrettyJSON(result), proxyResult ? CPPrettyJSON(proxyResult) : @""]];
+            NSString *menubarError = CPString(menubarResult[@"error"]);
+            if (proxyError.length) {
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"设置已保存，代理模式切换失败：%@", proxyError];
+            } else if (menubarError.length) {
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"设置已保存，菜单栏常驻切换失败：%@", menubarError];
+            } else {
+                self.statusLabel.stringValue = restartRequired ? @"设置已保存；端口变更需要重启后台生效" : @"设置已保存";
+            }
+            [self.owner appendLog:[NSString stringWithFormat:@"设置保存\n%@\n%@\n%@", CPPrettyJSON(result), proxyResult ? CPPrettyJSON(proxyResult) : @"", menubarResult ? CPPrettyJSON(menubarResult) : @""]];
             [self.owner refreshSnapshots:nil];
             [self refresh:nil];
         });
@@ -5881,6 +6110,7 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, strong) NSMenuItem *quota5hMenuItem;
 @property(nonatomic, strong) NSMenuItem *quota7dMenuItem;
 @property(nonatomic, strong) NSTimer *statusRefreshTimer;
+@property(nonatomic, assign) BOOL launchAsMenuBarOnly;
 @end
 
 @implementation AppDelegate
@@ -5896,6 +6126,9 @@ static NSImage *CPMenuBarIconImage(void) {
                                                              selector:@selector(refreshMenuStatus:)
                                                              userInfo:nil
                                                               repeats:YES];
+    if (!self.launchAsMenuBarOnly) {
+        [self openControlCenter:nil];
+    }
 }
 
 - (void)installStatusItem {
@@ -6036,8 +6269,15 @@ static NSImage *CPMenuBarIconImage(void) {
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
+        BOOL menuBarOnly = NO;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--menubar-only") == 0) {
+                menuBarOnly = YES;
+            }
+        }
         NSApplication *app = NSApplication.sharedApplication;
         AppDelegate *delegate = [[AppDelegate alloc] init];
+        delegate.launchAsMenuBarOnly = menuBarOnly;
         app.delegate = delegate;
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [app run];

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.0 - 2026-06-16
+
+- Changed the macOS Token activity view to show daily, weekly, and cumulative heatmaps stacked vertically at a larger size.
+- Added a login-at-startup menu bar setting under Advanced so the control app can stay resident without opening a window.
+- Fixed macOS settings fallback saves when user-set config marker keys are present.
+- Kept the left sidebar glass effect while stabilizing the main settings background to avoid visual bleed-through.
+- Fixed macOS control center layout compression around account quota, refresh timing, and Token activity controls.
+- Fixed settings save validation so only the active settings page is submitted and invalid fields get clear Chinese errors.
+- Changed Token usage tooltips in the macOS app and Web status page to use K/M compact token counts.
+
 ## v0.6.8 - 2026-06-16
 
 - Added full-proxy iPhone Remote compatibility by keeping non-model ChatGPT backend traffic on a fixed primary account while Codex model responses continue using the pooled account rotation.

@@ -15,11 +15,13 @@ from runtime_manifest import BUILD_MANIFEST, RUNTIME_MANIFEST, ManifestError, co
 from version import DEFAULT_VERSION, app_version
 
 LABEL = "com.fank1ng.xiaolachang"
+MENUBAR_LABEL = "com.fank1ng.xiaolachang.menubar"
 OLD_LABEL = "com.fank1ng.codexproxyapi"
 SOURCE_DIR_ENV = "CODEX_PROXY_SOURCE_DIR"
 APP_BUNDLE_ENV = "CODEX_PROXY_APP_BUNDLE"
 PYTHON_ENV = "CODEX_PROXY_PYTHON"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+MENUBAR_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{MENUBAR_LABEL}.plist"
 OLD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{OLD_LABEL}.plist"
 RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "xiaolachang"
 OLD_RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "codexproxyapi"
@@ -93,6 +95,7 @@ def status() -> dict:
     )
     needs_repair = bool((PLIST_PATH.exists() and repair_reasons) or migration_required)
     manifest = runtime_integrity(source=source, runtime=RUNTIME_DIR)
+    menubar = menubar_login_status()
     return {
         "supported": sys.platform == "darwin",
         "label": LABEL,
@@ -128,6 +131,8 @@ def status() -> dict:
         "needs_repair": needs_repair,
         "repair_reasons": repair_reasons,
         "log_path": str(LOG_PATH),
+        "menubar_login": menubar,
+        "menubar_login_enabled": menubar.get("enabled"),
     }
 
 
@@ -200,6 +205,49 @@ def ensure_running() -> dict:
     return install(sync=bool(current.get("migration_required") or current.get("version_mismatch")))
 
 
+def menubar_login_status() -> dict:
+    loaded = _menubar_launchctl_print().returncode == 0
+    installed = MENUBAR_PLIST_PATH.exists()
+    installed_plist = _installed_plist(MENUBAR_PLIST_PATH)
+    installed_args = installed_plist.get("ProgramArguments") or []
+    program = _menubar_program()
+    return {
+        "action": "menubar_login_status",
+        "supported": sys.platform == "darwin",
+        "label": MENUBAR_LABEL,
+        "plist_path": str(MENUBAR_PLIST_PATH),
+        "app_bundle": str(_app_bundle_dir()),
+        "program": str(program),
+        "installed_program": str(installed_args[0]) if installed_args else "",
+        "installed": installed,
+        "loaded": loaded,
+        "enabled": installed,
+        "available": program.exists(),
+    }
+
+
+def set_menubar_login_item(enabled: bool) -> dict:
+    if sys.platform != "darwin":
+        raise RuntimeError("LaunchAgent is only supported on macOS")
+    if enabled:
+        program = _menubar_program()
+        if not program.exists():
+            raise RuntimeError(f"control app executable not found: {program}")
+        MENUBAR_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(MENUBAR_PLIST_PATH, "wb") as f:
+            plistlib.dump(_menubar_plist(program), f)
+        _run(["launchctl", "bootout", _domain(), str(MENUBAR_PLIST_PATH)], check=False)
+        _run(["launchctl", "bootstrap", _domain(), str(MENUBAR_PLIST_PATH)])
+    else:
+        _run(["launchctl", "bootout", _domain(), str(MENUBAR_PLIST_PATH)], check=False)
+        if MENUBAR_PLIST_PATH.exists():
+            MENUBAR_PLIST_PATH.unlink()
+    result = menubar_login_status()
+    result["action"] = "set_menubar_login_item"
+    result["changed_to"] = bool(enabled)
+    return result
+
+
 def _plist() -> dict:
     env = {
         "PYTHONUNBUFFERED": "1",
@@ -218,6 +266,21 @@ def _plist() -> dict:
         "StandardOutPath": str(LOG_PATH),
         "StandardErrorPath": str(LOG_PATH),
         "EnvironmentVariables": env,
+    }
+
+
+def _menubar_plist(program: Path) -> dict:
+    return {
+        "Label": MENUBAR_LABEL,
+        "ProgramArguments": [str(program), "--menubar-only"],
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "StandardOutPath": str(RUNTIME_DIR / "control-app.log"),
+        "StandardErrorPath": str(RUNTIME_DIR / "control-app.log"),
+        "EnvironmentVariables": {
+            SOURCE_DIR_ENV: str(_source_dir().resolve()),
+            APP_BUNDLE_ENV: str(_app_bundle_dir()),
+        },
     }
 
 
@@ -471,6 +534,19 @@ def _app_bundle_dir() -> Path:
     return CONFIG_DIR / "小腊肠.app"
 
 
+def _menubar_program() -> Path:
+    app = _app_bundle_dir()
+    info = app / "Contents" / "Info.plist"
+    executable = "XiaoLaChang"
+    if info.exists():
+        try:
+            with open(info, "rb") as f:
+                executable = plistlib.load(f).get("CFBundleExecutable") or executable
+        except Exception:
+            pass
+    return app / "Contents" / "MacOS" / executable
+
+
 def _python_executable() -> Path:
     configured = os.environ.get(PYTHON_ENV)
     if configured:
@@ -650,6 +726,10 @@ def _launchctl_print() -> subprocess.CompletedProcess:
 
 def _legacy_launchctl_print() -> subprocess.CompletedProcess:
     return _run(["launchctl", "print", f"{_domain()}/{OLD_LABEL}"], check=False)
+
+
+def _menubar_launchctl_print() -> subprocess.CompletedProcess:
+    return _run(["launchctl", "print", f"{_domain()}/{MENUBAR_LABEL}"], check=False)
 
 
 def _installed_program() -> str:

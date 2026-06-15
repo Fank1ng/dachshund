@@ -66,6 +66,7 @@ KEY_LABELS = {
     "proxy_version": "后台 API 版本",
     "manifest_ok": "Manifest 一致",
     "manifest_error": "Manifest 错误",
+    "menubar_login": "菜单栏登录项",
     "token_usage_api_ok": "Token 汇总接口",
     "token_usage_events_api_ok": "Token 事件接口",
     "token_usage_schema_ok": "Token 捕获状态表结构",
@@ -133,6 +134,8 @@ VALUE_LABELS = {
     "codex_app_missing": "未找到 Codex App",
     "update already in progress": "正在应用更新，请稍后再试",
     "set_config": "保存设置",
+    "menubar_login_status": "菜单栏登录项状态",
+    "set_menubar_login_item": "设置菜单栏登录项",
 }
 
 CONFIG_SET_KEYS = {
@@ -143,11 +146,13 @@ CONFIG_SET_KEYS = {
     "max_retries",
     "quota_refresh_interval",
     "quota_tracker_enabled",
+    "quota_tracker_user_set",
     "max_request_body_mb",
     "upstream_connect_timeout_sec",
     "upstream_transient_retries",
     "upstream_transient_backoff_ms",
     "codex_stream_mode",
+    "codex_stream_mode_user_set",
     "codex_hybrid_probe_seconds",
     "codex_hybrid_probe_bytes",
     "codex_stream_retry_cooldown",
@@ -1008,6 +1013,7 @@ def clear_auth_error(name: str) -> dict:
 
 def status() -> dict:
     service = service_manager.status()
+    menubar = service_manager.menubar_login_status()
     codex = codex_config.status()
     proxy = proxy_status()
     cfg = config.load()
@@ -1045,6 +1051,8 @@ def status() -> dict:
         "installed_program": service.get("installed_program"),
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
+        "menubar_login": menubar,
+        "menubar_login_enabled": menubar.get("enabled"),
     })
 
 
@@ -1129,6 +1137,17 @@ def set_config(config_json: str) -> dict:
     }
 
 
+def menubar_login_status() -> dict:
+    return service_manager.menubar_login_status()
+
+
+def set_menubar_login_item(enabled: bool) -> dict:
+    try:
+        return service_manager.set_menubar_login_item(enabled)
+    except RuntimeError as e:
+        return {"action": "set_menubar_login_item", "error": str(e), "enabled": enabled}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1157,6 +1176,9 @@ def main() -> None:
             "set-rotation-strategy",
             "set-codex-stream-mode",
             "set-config",
+            "menubar-login-status",
+            "enable-menubar-login",
+            "disable-menubar-login",
         ),
     )
     parser.add_argument("--name", default="")
@@ -1190,6 +1212,9 @@ def main() -> None:
         "set-rotation-strategy": lambda: set_rotation_strategy(args.strategy),
         "set-codex-stream-mode": lambda: set_codex_stream_mode(args.stream_mode),
         "set-config": lambda: set_config(args.config_json),
+        "menubar-login-status": menubar_login_status,
+        "enable-menubar-login": lambda: set_menubar_login_item(True),
+        "disable-menubar-login": lambda: set_menubar_login_item(False),
     }
     print(render_output(actions[args.action](), args.format))
 

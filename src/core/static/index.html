@@ -346,10 +346,10 @@ function usageTip(row) {
   const reasoningObserved = Boolean(row.reasoning_tokens_observed) || (Number(row.reasoning_tokens_observed_requests) || 0) > 0;
   const lines = [
     row.period_label || row.date || row.week_start || '-',
-    `总计 ${formatExactTokenCount(row.total_tokens || 0)} tokens`,
-    `输入 ${formatExactTokenCount(row.input_tokens || 0)} · 输出 ${formatExactTokenCount(row.output_tokens || 0)}`,
-    `缓存 ${cacheObserved ? formatExactTokenCount(cache) : '-'}`,
-    `推理 ${reasoningObserved ? formatExactTokenCount(row.reasoning_tokens || 0) : '-'}`,
+    `总计 ${formatTokenCount(row.total_tokens || 0)} tokens`,
+    `输入 ${formatTokenCount(row.input_tokens || 0)} · 输出 ${formatTokenCount(row.output_tokens || 0)}`,
+    `缓存 ${cacheObserved ? formatTokenCount(cache) : '-'}`,
+    `推理 ${reasoningObserved ? formatTokenCount(row.reasoning_tokens || 0) : '-'}`,
     `请求 ${requests} · 已知 ${known} · 未知 ${unknown}`
   ];
   if ((Number(row.active_days) || 0) > 0) lines.push(`使用天数 ${Number(row.active_days) || 0} / 7`);
