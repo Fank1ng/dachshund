@@ -317,6 +317,89 @@ class AccountTests(unittest.TestCase):
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
+    def test_most_available_prefers_known_quota_over_missing_quota(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            pool = AccountPool()
+            account_a = Account("a", root / "a" / "auth.json")
+            account_a.access_token = "token-a"
+            account_b = Account("b", root / "b" / "auth.json")
+            account_b.access_token = "token-b"
+            pool.accounts = [account_a, account_b]
+            (root / "b").mkdir(parents=True)
+            with open(root / "b" / "quota.json", "w") as f:
+                json.dump({
+                    "rate_limit": {
+                        "allowed": True,
+                        "limit_reached": False,
+                        "primary_window": {"used_percent": 10},
+                        "secondary_window": {"used_percent": 20},
+                    },
+                }, f)
+
+            def fake_get(key):
+                return {
+                    "rotation_strategy": "most_available",
+                    "quota_weight_5h": 0.5,
+                    "quota_weight_7d": 0.5,
+                }.get(key)
+
+            with mock.patch("account_manager.get", side_effect=fake_get):
+                picked = pool.pick()
+                report = pool.selection_report()
+
+            self.assertEqual(picked.name, "b")
+            self.assertEqual(report["predicted_account"], "b")
+            self.assertIn("missing_quota", report["accounts"][0]["reasons"])
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_most_available_skips_quota_limited_account(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            pool = AccountPool()
+            account_a = Account("a", root / "a" / "auth.json")
+            account_a.access_token = "token-a"
+            account_b = Account("b", root / "b" / "auth.json")
+            account_b.access_token = "token-b"
+            pool.accounts = [account_a, account_b]
+            for account, allowed, reached, five_hour, seven_day in (
+                (account_a, False, True, 0, 0),
+                (account_b, True, False, 50, 50),
+            ):
+                quota_dir = root / account.name
+                quota_dir.mkdir(parents=True)
+                with open(quota_dir / "quota.json", "w") as f:
+                    json.dump({
+                        "rate_limit": {
+                            "allowed": allowed,
+                            "limit_reached": reached,
+                            "primary_window": {"used_percent": five_hour},
+                            "secondary_window": {"used_percent": seven_day},
+                        },
+                    }, f)
+
+            def fake_get(key):
+                return {
+                    "rotation_strategy": "most_available",
+                    "quota_weight_5h": 0.5,
+                    "quota_weight_7d": 0.5,
+                }.get(key)
+
+            with mock.patch("account_manager.get", side_effect=fake_get):
+                picked = pool.pick()
+                report = pool.selection_report()
+
+            self.assertEqual(picked.name, "b")
+            self.assertIn("quota_disallowed", report["accounts"][0]["reasons"])
+            self.assertFalse(report["accounts"][0]["selectable"])
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
 
 class UsageStatsTests(unittest.TestCase):
     def test_extract_usage_from_nested_json(self):
@@ -2099,6 +2182,51 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertTrue(second_hit)
         self.assertEqual(third.name, "b")
         self.assertFalse(third_hit)
+
+    def test_session_affinity_switches_when_bound_account_quota_is_limited(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            pool = AccountPool()
+            account_a = Account("a", root / "a" / "auth.json")
+            account_a.access_token = "token-a"
+            account_b = Account("b", root / "b" / "auth.json")
+            account_b.access_token = "token-b"
+            pool.accounts = [account_a, account_b]
+            for account, allowed, reached, five_hour, seven_day in (
+                (account_a, False, True, 0, 0),
+                (account_b, True, False, 50, 50),
+            ):
+                quota_dir = root / account.name
+                quota_dir.mkdir(parents=True)
+                with open(quota_dir / "quota.json", "w") as f:
+                    json.dump({
+                        "rate_limit": {
+                            "allowed": allowed,
+                            "limit_reached": reached,
+                            "primary_window": {"used_percent": five_hour},
+                            "secondary_window": {"used_percent": seven_day},
+                        },
+                    }, f)
+
+            def fake_get(key):
+                return {
+                    "session_affinity_enabled": True,
+                    "session_affinity_ttl_seconds": 3600,
+                    "rotation_strategy": "most_available",
+                    "quota_weight_5h": 0.5,
+                    "quota_weight_7d": 0.5,
+                }.get(key)
+
+            with mock.patch("account_manager.get", side_effect=fake_get):
+                pool.bind_session("session-1", account_a)
+                picked, hit = pool.pick_for_session("session-1")
+
+            self.assertEqual(picked.name, "b")
+            self.assertFalse(hit)
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
 
     def test_fetch_complete_codex_stream_buffers_completed_response(self):
         response = _FakeUpstreamResponse([

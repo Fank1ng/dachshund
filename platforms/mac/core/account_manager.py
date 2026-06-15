@@ -349,13 +349,13 @@ class AccountPool:
             if self._is_eligible(acct, exclude)
         ]
 
-    @staticmethod
-    def _is_eligible(account: "Account", exclude: set[str]) -> bool:
+    def _is_eligible(self, account: "Account", exclude: set[str]) -> bool:
         return (
             account.name not in exclude
             and account.enabled
             and not account.is_rate_limited
             and bool(account.access_token)
+            and not self._quota_limit_reason(account)
         )
 
     def _pick_round_robin(self, exclude: set[str]) -> Optional["Account"]:
@@ -363,7 +363,7 @@ class AccountPool:
             idx = self._next_idx % len(self.accounts)
             self._next_idx += 1
             acct = self.accounts[idx]
-            if acct.name not in exclude and acct.enabled and not acct.is_rate_limited and acct.access_token:
+            if self._is_eligible(acct, exclude):
                 return acct
         return None
 
@@ -374,7 +374,7 @@ class AccountPool:
             for index, acct in enumerate(candidates)
         ]
         known = [item for item in ranked if item[0] is not None]
-        if not known or len(known) != len(candidates):
+        if not known:
             return None
         _, _, picked = min(known, key=lambda item: (item[0], item[1]))
         if picked in self.accounts:
@@ -390,6 +390,7 @@ class AccountPool:
         eligible = []
         for index, acct in enumerate(self.accounts):
             pressure = self._quota_pressure(acct)
+            quota_limit_reason = self._quota_limit_reason(acct)
             reasons = []
             if not acct.enabled:
                 reasons.append("disabled")
@@ -401,10 +402,12 @@ class AccountPool:
                 reasons.append("missing_token")
             if acct.auth_error:
                 reasons.append(acct.auth_error)
-            if strategy == "most_available" and pressure is None:
+            if quota_limit_reason:
+                reasons.append(quota_limit_reason)
+            if strategy == "most_available" and pressure is None and not quota_limit_reason:
                 reasons.append("missing_quota")
             selectable = not reasons or reasons == ["missing_quota"]
-            if acct.enabled and not acct.is_rate_limited and acct.access_token:
+            if self._is_eligible(acct, set()):
                 eligible.append((index, acct, pressure))
             rows.append({
                 "name": acct.name,
@@ -422,10 +425,10 @@ class AccountPool:
         note = ""
         if strategy == "most_available":
             known = [item for item in eligible if item[2] is not None]
-            if known and len(known) == len(eligible):
+            if known:
                 _, predicted_acct, _ = min(known, key=lambda item: (item[2], item[0]))
                 predicted = predicted_acct.name
-                note = "using weighted quota pressure"
+                note = "using weighted quota pressure; missing quota accounts are fallback"
             elif eligible:
                 predicted = self._preview_round_robin(set())
                 note = "falling back to round_robin because quota data is incomplete"
@@ -453,27 +456,60 @@ class AccountPool:
         for offset in range(len(self.accounts)):
             idx = (self._next_idx + offset) % len(self.accounts)
             acct = self.accounts[idx]
-            if acct.name not in exclude and acct.enabled and not acct.is_rate_limited and acct.access_token:
+            if self._is_eligible(acct, exclude):
                 return acct.name
         return None
 
     def _quota_pressure(self, account: Account) -> Optional[float]:
-        quota_file = ACCOUNTS_DIR / account.name / "quota.json"
+        data = self._read_quota(account)
+        if data is None or self._quota_limit_reason_from_data(data):
+            return None
+        return self._quota_pressure_from_data(data)
+
+    def _quota_limit_reason(self, account: Account) -> str:
+        data = self._read_quota(account)
+        if data is None:
+            return ""
+        return self._quota_limit_reason_from_data(data)
+
+    @staticmethod
+    def _read_quota(account: Account) -> Optional[dict]:
+        quota_file = account.auth_path.parent / "quota.json"
         if not quota_file.exists():
             return None
         try:
             with open(quota_file, encoding="utf-8") as f:
-                data = json.load(f)
+                return json.load(f)
         except Exception:
             return None
+
+    @staticmethod
+    def _quota_limit_reason_from_data(data: dict) -> str:
+        rate_limit = data.get("rate_limit") or {}
+        if rate_limit.get("allowed") is False:
+            return "quota_disallowed"
+        if rate_limit.get("limit_reached") is True:
+            return "quota_limit_reached"
+        if data.get("rate_limit_reached_type"):
+            return "quota_limit_reached"
+        spend_control = data.get("spend_control") or {}
+        if spend_control.get("reached") is True:
+            return "spend_limit_reached"
+        credits = data.get("credits") or {}
+        if credits.get("overage_limit_reached") is True:
+            return "overage_limit_reached"
+        return ""
+
+    @staticmethod
+    def _quota_pressure_from_data(data: dict) -> Optional[float]:
         rate_limit = data.get("rate_limit") or {}
         primary = rate_limit.get("primary_window") or {}
         secondary = rate_limit.get("secondary_window") or {}
-        five_hour = self._quota_percent(primary.get("used_percent"), data.get("5h_usage"))
-        seven_day = self._quota_percent(secondary.get("used_percent"), data.get("weekly_usage"))
+        five_hour = AccountPool._quota_percent(primary.get("used_percent"), data.get("5h_usage"))
+        seven_day = AccountPool._quota_percent(secondary.get("used_percent"), data.get("weekly_usage"))
         if five_hour is None:
             return None
-        if self._uses_shared_codex_window(data, primary, secondary):
+        if AccountPool._uses_shared_codex_window(data, primary, secondary):
             seven_day = five_hour
         elif seven_day is None:
             return None

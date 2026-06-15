@@ -4,7 +4,10 @@ set -euo pipefail
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
 CORE_DIR="$MAC_DIR/core"
-APP="$ROOT/小腊肠.app"
+APP_LINK="$ROOT/XiaoLaChang.app"
+LEGACY_APP_LINK="$ROOT/小腊肠.app"
+APP="${APP:-$HOME/Applications/XiaoLaChang.app}"
+LEGACY_APP="${LEGACY_APP:-$HOME/Applications/小腊肠.app}"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
@@ -13,7 +16,7 @@ VERSION_FILE="$ROOT/VERSION"
 APP_VERSION="${APP_VERSION:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
-SIGNED_APP="${SIGNED_APP:-/private/tmp/小腊肠.app}"
+SIGNED_APP="${SIGNED_APP:-/private/tmp/XiaoLaChang.app}"
 
 clear_bundle_xattrs() {
   local target="$1"
@@ -30,7 +33,9 @@ sign_macho_files() {
   find "$target" -type f -print0 | while IFS= read -r -d '' file; do
     filetype="$(/usr/bin/file -b "$file" 2>/dev/null || true)"
     if [[ "$filetype" == *Mach-O* ]]; then
+      xattr -c "$file" 2>/dev/null || true
       codesign --force --sign - "$file" >/dev/null
+      xattr -c "$file" 2>/dev/null || true
     fi
   done
 }
@@ -43,6 +48,7 @@ sign_runtime_components() {
   sign_macho_files "$runtime"
   if [ -d "$python_app" ]; then
     codesign --force --deep --sign - "$python_app" >/dev/null
+    clear_bundle_xattrs "$python_app"
     codesign --verify --deep --strict "$python_app"
   fi
   if [ -d "$python_framework" ]; then
@@ -50,7 +56,10 @@ sign_runtime_components() {
   fi
 }
 
-rm -rf "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Info.plist"
+if [ "$LEGACY_APP" != "$APP" ]; then
+  rm -rf "$LEGACY_APP"
+fi
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
 
 if [ ! -f "$APP_ICON" ]; then
@@ -106,6 +115,10 @@ done
 rm -rf "$RUNTIME/static"
 cp -R "$CORE_DIR/static" "$RUNTIME/static"
 cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
+if [ ! -f "$RUNTIME/static/icons/dog-head.png" ] && [ ! -f "$RESOURCES/AppIcon.icns" ]; then
+  echo "Refusing to build without a menu bar icon resource." >&2
+  exit 1
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -115,7 +128,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleExecutable</key>
-  <string>小腊肠</string>
+  <string>XiaoLaChang</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
@@ -123,6 +136,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
+  <string>小腊肠</string>
+  <key>CFBundleDisplayName</key>
   <string>小腊肠</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
@@ -132,6 +147,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>$APP_VERSION</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
+  <key>LSUIElement</key>
+  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -191,8 +208,8 @@ for package in packages:
         shutil.copy2(src, dst)
 PY
 
-clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/小腊肠"
-chmod +x "$APP/Contents/MacOS/小腊肠"
+clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/XiaoLaChang"
+chmod +x "$APP/Contents/MacOS/XiaoLaChang"
 
 find "$APP" -name ".DS_Store" -delete
 find "$RUNTIME" \( -name "*.log" -o -name "recent_requests.json" \) -delete
@@ -232,13 +249,34 @@ if not check.get("ok"):
 PY
 
 clear_bundle_xattrs "$APP"
+sign_runtime_components "$APP/Contents/Resources/runtime"
+clear_bundle_xattrs "$APP"
+codesign --force --deep --sign - "$APP" >/dev/null
+codesign --verify --deep --strict "$APP"
 
 echo "Built $APP"
 
 rm -rf "$SIGNED_APP"
 ditto --norsrc "$APP" "$SIGNED_APP"
 clear_bundle_xattrs "$SIGNED_APP"
-sign_runtime_components "$SIGNED_APP/Contents/Resources/runtime"
 codesign --force --deep --sign - "$SIGNED_APP" >/dev/null
 codesign --verify --deep --strict "$SIGNED_APP"
 echo "Signed copy: $SIGNED_APP"
+if [ "$APP" != "$APP_LINK" ]; then
+  rm -rf "$APP_LINK"
+  ln -s "$APP" "$APP_LINK"
+  echo "Workspace link: $APP_LINK -> $APP"
+fi
+if [ -L "$LEGACY_APP_LINK" ]; then
+  rm -f "$LEGACY_APP_LINK"
+fi
+SYSTEM_APP_LINK="/Applications/XiaoLaChang.app"
+LEGACY_SYSTEM_APP_LINK="/Applications/小腊肠.app"
+if [ -d /Applications ] && [ -w /Applications ] && [ "$APP" != "$SYSTEM_APP_LINK" ]; then
+  rm -rf "$SYSTEM_APP_LINK"
+  ln -s "$APP" "$SYSTEM_APP_LINK"
+  echo "Applications link: $SYSTEM_APP_LINK -> $APP"
+fi
+if [ -L "$LEGACY_SYSTEM_APP_LINK" ]; then
+  rm -f "$LEGACY_SYSTEM_APP_LINK"
+fi

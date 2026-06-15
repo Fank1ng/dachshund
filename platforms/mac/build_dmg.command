@@ -3,9 +3,11 @@ set -euo pipefail
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-APP_NAME="小腊肠.app"
-APP="$ROOT/$APP_NAME"
+APP_NAME="XiaoLaChang.app"
 BUILD_DIR="$ROOT/build"
+APP_BUILD_DIR="${APP_BUILD_DIR:-${TMPDIR:-/private/tmp}/xiaolachang-build}"
+APP="${APP:-$APP_BUILD_DIR/$APP_NAME}"
+SIGNED_APP="${SIGNED_APP:-$APP_BUILD_DIR/Signed-$APP_NAME}"
 STAGE_LINK="$BUILD_DIR/dmg-stage"
 STAGE="${TMPDIR:-/private/tmp}/xiaolachang-dmg-stage"
 DIST="$ROOT/dist"
@@ -26,7 +28,9 @@ sign_macho_files() {
   find "$target" -type f -print0 | while IFS= read -r -d '' file; do
     filetype="$(/usr/bin/file -b "$file" 2>/dev/null || true)"
     if [[ "$filetype" == *Mach-O* ]]; then
+      xattr -c "$file" 2>/dev/null || true
       codesign --force --sign - "$file" >/dev/null
+      xattr -c "$file" 2>/dev/null || true
     fi
   done
 }
@@ -39,6 +43,7 @@ sign_runtime_components() {
   sign_macho_files "$runtime"
   if [ -d "$python_app" ]; then
     codesign --force --deep --sign - "$python_app" >/dev/null
+    clear_bundle_xattrs "$python_app"
     codesign --verify --deep --strict "$python_app"
   fi
   if [ -d "$python_framework" ]; then
@@ -160,7 +165,7 @@ OSA
   hdiutil detach "$mount_point" >/dev/null || hdiutil detach "$mount_point" -force >/dev/null
 }
 
-"$MAC_DIR/build_control_app.command"
+APP="$APP" SIGNED_APP="$SIGNED_APP" "$MAC_DIR/build_control_app.command"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 DMG_NAME="XiaoLaChang-${VERSION}-mac.dmg"
@@ -199,7 +204,7 @@ chflags hidden "$STAGE/.background" 2>/dev/null || true
 cat > "$STAGE/首次打开说明.txt" <<'TXT'
 小腊肠首次打开说明
 
-1. 把小腊肠.app拖到 Applications。
+1. 把 XiaoLaChang.app 拖到 Applications。App 打开后显示名仍是“小腊肠”。
 2. 如果 macOS 提示“无法验证开发者”，请右键点击 App，选择“打开”，再在弹窗中确认。
 3. 如果仍被拦截，进入“系统设置” -> “隐私与安全性”，允许打开小腊肠。
 4. 打开 App 后点击“启动/修复”，然后按界面提示添加账号并启用代理。

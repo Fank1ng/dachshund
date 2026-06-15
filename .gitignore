@@ -8,6 +8,7 @@ Codex Proxy Control.app/
 *.msi
 *.msix
 *.msixbundle
+*.app
 *.appx
 *.appxbundle
 .vs/
@@ -22,6 +23,7 @@ python/
 __pycache__/
 .env
 *.log
-recent_requests.json
+recent_requests*.json
+.claude/
 usage_history.sqlite
 usage_stats.json
