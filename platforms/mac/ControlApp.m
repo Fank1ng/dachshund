@@ -2441,16 +2441,28 @@ static NSImage *CPMenuBarIconImage(void) {
         NSString *name = CPString(account[@"name"]);
         NSStackView *row = [[NSStackView alloc] init];
         row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        row.alignment = NSLayoutAttributeCenterY;
-        row.spacing = 8;
+        row.alignment = NSLayoutAttributeTop;
+        row.spacing = 10;
+        row.translatesAutoresizingMaskIntoConstraints = NO;
         NSTextField *nameLabel = [self labelWithText:CPDisplayString(name) font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:NSColor.labelColor];
-        [nameLabel.widthAnchor constraintEqualToConstant:44].active = YES;
+        [nameLabel.widthAnchor constraintEqualToConstant:34].active = YES;
         [row addArrangedSubview:nameLabel];
+
+        NSStackView *lanes = [[NSStackView alloc] init];
+        lanes.orientation = NSUserInterfaceLayoutOrientationVertical;
+        lanes.alignment = NSLayoutAttributeWidth;
+        lanes.spacing = 4;
+        lanes.translatesAutoresizingMaskIntoConstraints = NO;
+        [lanes setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [lanes setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSProgressIndicator *primary = [self progressWithValue:[self quotaRemainingForAccountName:name weekly:NO]];
         NSProgressIndicator *secondary = [self progressWithValue:[self quotaRemainingForAccountName:name weekly:YES]];
-        [row addArrangedSubview:[self quotaGroupWithTitle:@"5h" progress:primary value:[self quotaTextForAccountName:name weekly:NO]]];
-        [row addArrangedSubview:[self quotaGroupWithTitle:@"7d" progress:secondary value:[self quotaTextForAccountName:name weekly:YES]]];
+        [lanes addArrangedSubview:[self quotaGroupWithTitle:@"5h" progress:primary value:[self quotaTextForAccountName:name weekly:NO]]];
+        [lanes addArrangedSubview:[self quotaGroupWithTitle:@"7d" progress:secondary value:[self quotaTextForAccountName:name weekly:YES]]];
+        [row addArrangedSubview:lanes];
+        [lanes.widthAnchor constraintEqualToAnchor:row.widthAnchor constant:-44].active = YES;
         [stack addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
     }
     if (!self.accounts.count) {
         [stack addArrangedSubview:[self emptyStateLabel:@"没有发现账号。请先添加账号或扫描账号目录。"]];
@@ -3118,15 +3130,17 @@ static NSImage *CPMenuBarIconImage(void) {
     right.alignment = NSTextAlignmentCenter;
     right.lineBreakMode = NSLineBreakByTruncatingMiddle;
     right.toolTip = value;
+    [left setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [right setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     [row addSubview:left];
     [row addSubview:right];
     [NSLayoutConstraint activateConstraints:@[
         [left.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [left.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [left.widthAnchor constraintEqualToConstant:76],
+        [left.widthAnchor constraintEqualToConstant:88],
 
-        [right.leadingAnchor constraintEqualToAnchor:left.trailingAnchor constant:8],
+        [right.leadingAnchor constraintEqualToAnchor:left.trailingAnchor constant:6],
         [right.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [right.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     ]];
@@ -3141,8 +3155,9 @@ static NSImage *CPMenuBarIconImage(void) {
     progress.doubleValue = MAX(0, MIN(100, value));
     progress.controlSize = NSControlSizeSmall;
     progress.translatesAutoresizingMaskIntoConstraints = NO;
-    [progress.widthAnchor constraintEqualToConstant:108].active = YES;
+    [progress.widthAnchor constraintGreaterThanOrEqualToConstant:96].active = YES;
     [progress setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [progress setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     return progress;
 }
 
@@ -3151,6 +3166,9 @@ static NSImage *CPMenuBarIconImage(void) {
     group.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     group.spacing = 8;
     group.alignment = NSLayoutAttributeCenterY;
+    group.distribution = NSStackViewDistributionFill;
+    group.translatesAutoresizingMaskIntoConstraints = NO;
+    [group.heightAnchor constraintEqualToConstant:22].active = YES;
     NSTextField *titleLabel = [self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
     titleLabel.alignment = NSTextAlignmentLeft;
     [titleLabel.widthAnchor constraintEqualToConstant:22].active = YES;
@@ -4187,7 +4205,9 @@ static NSImage *CPMenuBarIconImage(void) {
         [view removeFromSuperview];
     }
 
-    [self.inspectorStack addArrangedSubview:[self accountGlobalActionsRow]];
+    if (!self.compactInspector) {
+        [self.inspectorStack addArrangedSubview:[self accountGlobalActionsRow]];
+    }
 
     NSDictionary *account = [self selectedAccount];
     if (!account.count) {
@@ -4223,28 +4243,41 @@ static NSImage *CPMenuBarIconImage(void) {
 
         NSStackView *buttonGrid = [[NSStackView alloc] init];
         buttonGrid.orientation = NSUserInterfaceLayoutOrientationVertical;
-        buttonGrid.spacing = 6;
+        buttonGrid.alignment = NSLayoutAttributeWidth;
+        buttonGrid.spacing = 8;
+        buttonGrid.translatesAutoresizingMaskIntoConstraints = NO;
         NSStackView *top = [[NSStackView alloc] init];
         top.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        top.spacing = 6;
+        top.alignment = NSLayoutAttributeCenterY;
+        top.spacing = 8;
         top.distribution = NSStackViewDistributionFillEqually;
+        [top.heightAnchor constraintEqualToConstant:30].active = YES;
         [top addArrangedSubview:[self smallButtonWithTitle:@"刷新令牌" symbol:@"key" selector:@selector(refreshTokenAction:)]];
         [top addArrangedSubview:[self smallButtonWithTitle:CPBool(account[@"enabled"]) ? @"禁用" : @"启用" symbol:@"power" selector:@selector(toggleAccountAction:)]];
         NSStackView *bottom = [[NSStackView alloc] init];
         bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        bottom.spacing = 6;
+        bottom.alignment = NSLayoutAttributeCenterY;
+        bottom.spacing = 8;
         bottom.distribution = NSStackViewDistributionFillEqually;
+        [bottom.heightAnchor constraintEqualToConstant:30].active = YES;
         [bottom addArrangedSubview:[self smallButtonWithTitle:@"解除冷却" symbol:@"timer" selector:@selector(clearCooldownAction:)]];
         [bottom addArrangedSubview:[self smallButtonWithTitle:@"解除异常" symbol:@"exclamationmark.triangle" selector:@selector(clearAuthErrorAction:)]];
         NSStackView *danger = [[NSStackView alloc] init];
         danger.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        danger.spacing = 6;
-        danger.distribution = NSStackViewDistributionFillEqually;
-        [danger addArrangedSubview:[self smallButtonWithTitle:@"删除" symbol:@"trash" selector:@selector(deleteAccountAction:)]];
+        danger.alignment = NSLayoutAttributeCenterY;
+        danger.spacing = 8;
+        [danger.heightAnchor constraintEqualToConstant:30].active = YES;
+        NSButton *deleteButton = [self smallButtonWithTitle:@"删除" symbol:@"trash" selector:@selector(deleteAccountAction:)];
+        [danger addArrangedSubview:deleteButton];
         [buttonGrid addArrangedSubview:top];
         [buttonGrid addArrangedSubview:bottom];
         [buttonGrid addArrangedSubview:danger];
         [self.inspectorStack addArrangedSubview:buttonGrid];
+        [buttonGrid.widthAnchor constraintEqualToAnchor:self.inspectorStack.widthAnchor].active = YES;
+        [top.widthAnchor constraintEqualToAnchor:buttonGrid.widthAnchor].active = YES;
+        [bottom.widthAnchor constraintEqualToAnchor:buttonGrid.widthAnchor].active = YES;
+        [danger.widthAnchor constraintEqualToAnchor:buttonGrid.widthAnchor].active = YES;
+        [deleteButton.widthAnchor constraintEqualToAnchor:danger.widthAnchor].active = YES;
         return;
     }
 
@@ -5367,7 +5400,7 @@ static NSImage *CPMenuBarIconImage(void) {
     header.layer.cornerRadius = 16;
     header.layer.masksToBounds = YES;
     if (@available(macOS 10.13, *)) {
-        header.layer.maskedCorners = kCALayerMinXMaxYCorner;
+        header.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
     }
     header.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -5736,7 +5769,12 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (void)refresh:(id)sender {
-    self.statusLabel.stringValue = @"正在读取设置...";
+    BOOL explicitRefresh = sender != nil;
+    if (explicitRefresh) {
+        self.statusLabel.stringValue = @"正在读取设置...";
+    } else if (self.statusLabel) {
+        self.statusLabel.stringValue = @"设置已载入，正在同步状态...";
+    }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *config = [self fetchJSONPath:@"/api/config" method:@"GET" body:nil timeout:3.0];
         NSDictionary *status = [self.owner fetchJSONPath:@"/api/status" method:@"GET" timeout:3.0];
@@ -5763,8 +5801,12 @@ static NSImage *CPMenuBarIconImage(void) {
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.owner applySnapshotPayload:ownerPayload ?: @{}];
-            self.configSnapshot = config ?: @{};
-            self.statusSnapshot = status ?: @{};
+            if (config.count) {
+                self.configSnapshot = config;
+            } else if (!self.configSnapshot.count) {
+                self.configSnapshot = [self defaultConfig];
+            }
+            self.statusSnapshot = status ?: self.statusSnapshot ?: @{};
             self.codexSnapshot = codex ?: @{};
             self.menubarLoginSnapshot = menubar ?: @{};
             NSInteger selected = self.selectedSettingsIndex;
