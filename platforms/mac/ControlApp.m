@@ -330,6 +330,7 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, assign) NSInteger selectedSettingsIndex;
 - (instancetype)initWithOwner:(ControlWindowController *)owner;
 - (void)show;
+- (void)seedInitialSnapshotsFromOwner;
 - (void)refresh:(id)sender;
 - (void)rebuildSettingsPagesSelectingIndex:(NSInteger)selected;
 - (void)populateControls;
@@ -1972,7 +1973,7 @@ static NSImage *CPMenuBarIconImage(void) {
     bar.doubleValue = MAX(0, MIN(100, progress * 100.0));
     bar.controlSize = NSControlSizeSmall;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
-    [bar.widthAnchor constraintGreaterThanOrEqualToConstant:90].active = YES;
+    [bar.widthAnchor constraintEqualToConstant:136].active = YES;
     [bar setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [row addArrangedSubview:bar];
 
@@ -2364,6 +2365,7 @@ static NSImage *CPMenuBarIconImage(void) {
     self.compactInspector = YES;
     self.inspectorStack = [[NSStackView alloc] init];
     self.inspectorStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.inspectorStack.alignment = NSLayoutAttributeWidth;
     self.inspectorStack.spacing = 6;
     self.inspectorStack.translatesAutoresizingMaskIntoConstraints = NO;
     [inspectorPanel addSubview:self.inspectorStack];
@@ -2387,6 +2389,7 @@ static NSImage *CPMenuBarIconImage(void) {
     self.compactInspector = compact;
     self.inspectorStack = [[NSStackView alloc] init];
     self.inspectorStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.inspectorStack.alignment = NSLayoutAttributeWidth;
     self.inspectorStack.spacing = compact ? 7 : 12;
     self.inspectorStack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:self.inspectorStack];
@@ -2760,7 +2763,7 @@ static NSImage *CPMenuBarIconImage(void) {
 - (NSView *)recentRequestsCard {
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
+    stack.alignment = NSLayoutAttributeWidth;
     stack.spacing = 8;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [stack.heightAnchor constraintEqualToConstant:190].active = YES;
@@ -2781,39 +2784,57 @@ static NSImage *CPMenuBarIconImage(void) {
     [stack addArrangedSubview:table];
     [table.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
-    NSStackView *rows = [[NSStackView alloc] init];
-    rows.orientation = NSUserInterfaceLayoutOrientationVertical;
-    rows.alignment = NSLayoutAttributeWidth;
-    rows.spacing = 0;
-    rows.translatesAutoresizingMaskIntoConstraints = NO;
-    [table addSubview:rows];
-    [self pinView:rows toView:table insets:NSEdgeInsetsMake(0, 0, 0, 0)];
-
-    NSView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" transport:@"传输" path:@"路径" header:YES];
-    [rows addArrangedSubview:head];
-    [head.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     NSArray *items = CPArray(self.statusSnapshot[@"recent_requests"]);
-    NSInteger count = MIN((NSInteger)items.count, 5);
-    for (NSInteger i = 0; i < count; i++) {
-        NSDictionary *item = CPDict(items[i]);
-        NSView *row = [self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
-                                             account:CPDisplayString(item[@"account"])
-                                              status:CPDisplayString(item[@"status"])
-                                           transport:CPDisplayString(item[@"transport"])
-                                                path:CPDisplayString(item[@"path"])
-                                              header:NO];
-        [rows addArrangedSubview:row];
-        [row.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
-    }
+    NSInteger count = MIN((NSInteger)items.count, 10);
     if (count == 0) {
         NSTextField *empty = [self emptyStateLabel:@"暂无最近请求。代理收到请求后会显示在这里。"];
-        [rows addArrangedSubview:empty];
-        [empty.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
+        [table addSubview:empty];
+        [NSLayoutConstraint activateConstraints:@[
+            [empty.leadingAnchor constraintEqualToAnchor:table.leadingAnchor constant:8],
+            [empty.trailingAnchor constraintEqualToAnchor:table.trailingAnchor constant:-8],
+            [empty.centerYAnchor constraintEqualToAnchor:table.centerYAnchor],
+        ]];
+        return stack;
+    }
+
+    NSStackView *columns = [[NSStackView alloc] init];
+    columns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    columns.alignment = NSLayoutAttributeTop;
+    columns.distribution = NSStackViewDistributionFillEqually;
+    columns.spacing = 12;
+    columns.translatesAutoresizingMaskIntoConstraints = NO;
+    [table addSubview:columns];
+    [self pinView:columns toView:table insets:NSEdgeInsetsMake(0, 0, 0, 0)];
+
+    for (NSInteger column = 0; column < 2; column++) {
+        NSStackView *rows = [[NSStackView alloc] init];
+        rows.orientation = NSUserInterfaceLayoutOrientationVertical;
+        rows.alignment = NSLayoutAttributeWidth;
+        rows.spacing = 0;
+        rows.translatesAutoresizingMaskIntoConstraints = NO;
+        [columns addArrangedSubview:rows];
+
+        NSView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" path:@"路径" header:YES];
+        [rows addArrangedSubview:head];
+        [head.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
+
+        NSInteger start = column * 5;
+        NSInteger end = MIN(start + 5, count);
+        for (NSInteger i = start; i < end; i++) {
+            NSDictionary *item = CPDict(items[i]);
+            NSView *row = [self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
+                                                 account:CPDisplayString(item[@"account"])
+                                                  status:CPDisplayString(item[@"status"])
+                                                    path:CPDisplayString(item[@"path"])
+                                                  header:NO];
+            [rows addArrangedSubview:row];
+            [row.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
+        }
     }
     return stack;
 }
 
-- (NSView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status transport:(NSString *)transport path:(NSString *)path header:(BOOL)header {
+- (NSView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status path:(NSString *)path header:(BOOL)header {
     NSView *row = [[NSView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [row.heightAnchor constraintEqualToConstant:header ? 24 : 25].active = YES;
@@ -2822,38 +2843,32 @@ static NSImage *CPMenuBarIconImage(void) {
     NSTextField *accountLabel = [self labelWithText:account font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
     BOOL statusOK = [status hasPrefix:@"1"] || [status hasPrefix:@"2"];
     NSTextField *statusLabel = [self labelWithText:status font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:statusOK ? NSColor.systemGreenColor : (header ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor)];
-    NSTextField *transportLabel = [self labelWithText:transport font:[NSFont monospacedSystemFontOfSize:9 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
     NSTextField *pathLabel = [self labelWithText:path font:[NSFont monospacedSystemFontOfSize:9 weight:NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.secondaryLabelColor];
     timeLabel.alignment = NSTextAlignmentLeft;
     accountLabel.alignment = NSTextAlignmentLeft;
     statusLabel.alignment = NSTextAlignmentCenter;
-    transportLabel.alignment = NSTextAlignmentLeft;
     pathLabel.alignment = NSTextAlignmentLeft;
     pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    pathLabel.toolTip = header ? nil : path;
     [row addSubview:timeLabel];
     [row addSubview:accountLabel];
     [row addSubview:statusLabel];
-    [row addSubview:transportLabel];
     [row addSubview:pathLabel];
     [NSLayoutConstraint activateConstraints:@[
-        [timeLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:8],
+        [timeLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:4],
         [timeLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [timeLabel.widthAnchor constraintEqualToConstant:54],
+        [timeLabel.widthAnchor constraintEqualToConstant:52],
 
-        [accountLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:66],
+        [accountLabel.leadingAnchor constraintEqualToAnchor:timeLabel.trailingAnchor constant:8],
         [accountLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [accountLabel.widthAnchor constraintEqualToConstant:30],
 
-        [statusLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:106],
+        [statusLabel.leadingAnchor constraintEqualToAnchor:accountLabel.trailingAnchor constant:8],
         [statusLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [statusLabel.widthAnchor constraintEqualToConstant:30],
+        [statusLabel.widthAnchor constraintEqualToConstant:34],
 
-        [transportLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:146],
-        [transportLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [transportLabel.widthAnchor constraintEqualToConstant:72],
-
-        [pathLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:224],
-        [pathLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
+        [pathLabel.leadingAnchor constraintEqualToAnchor:statusLabel.trailingAnchor constant:8],
+        [pathLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-4],
         [pathLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     ]];
     return row;
@@ -3092,6 +3107,32 @@ static NSImage *CPMenuBarIconImage(void) {
     return row;
 }
 
+- (NSView *)accountInspectorInfoRowWithTitle:(NSString *)title value:(NSString *)value {
+    NSView *row = [[NSView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row.heightAnchor constraintEqualToConstant:25].active = YES;
+
+    NSTextField *left = [self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
+    NSTextField *right = [self labelWithText:value font:[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.labelColor];
+    left.alignment = NSTextAlignmentLeft;
+    right.alignment = NSTextAlignmentCenter;
+    right.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    right.toolTip = value;
+
+    [row addSubview:left];
+    [row addSubview:right];
+    [NSLayoutConstraint activateConstraints:@[
+        [left.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [left.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [left.widthAnchor constraintEqualToConstant:76],
+
+        [right.leadingAnchor constraintEqualToAnchor:left.trailingAnchor constant:8],
+        [right.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [right.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+    ]];
+    return row;
+}
+
 - (NSProgressIndicator *)progressWithValue:(double)value {
     NSProgressIndicator *progress = [[NSProgressIndicator alloc] init];
     progress.indeterminate = NO;
@@ -3100,7 +3141,7 @@ static NSImage *CPMenuBarIconImage(void) {
     progress.doubleValue = MAX(0, MIN(100, value));
     progress.controlSize = NSControlSizeSmall;
     progress.translatesAutoresizingMaskIntoConstraints = NO;
-    [progress.widthAnchor constraintGreaterThanOrEqualToConstant:96].active = YES;
+    [progress.widthAnchor constraintEqualToConstant:108].active = YES;
     [progress setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     return progress;
 }
@@ -3110,9 +3151,15 @@ static NSImage *CPMenuBarIconImage(void) {
     group.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     group.spacing = 8;
     group.alignment = NSLayoutAttributeCenterY;
-    [group addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor]];
+    NSTextField *titleLabel = [self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
+    titleLabel.alignment = NSTextAlignmentLeft;
+    [titleLabel.widthAnchor constraintEqualToConstant:22].active = YES;
+    [group addArrangedSubview:titleLabel];
     [group addArrangedSubview:progress];
-    [group addArrangedSubview:[self labelWithText:value font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
+    NSTextField *valueLabel = [self labelWithText:value font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
+    valueLabel.alignment = NSTextAlignmentRight;
+    [valueLabel.widthAnchor constraintEqualToConstant:44].active = YES;
+    [group addArrangedSubview:valueLabel];
     return group;
 }
 
@@ -4167,12 +4214,12 @@ static NSImage *CPMenuBarIconImage(void) {
         NSTextField *reasonLabel = [self labelWithText:[self selectionReasonForAccountName:CPString(account[@"name"])] font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
         reasonLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         [self.inspectorStack addArrangedSubview:reasonLabel];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"邮箱" value:CPDisplayString(account[@"email"])]];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"Token" value:CPRelativeTime(account[@"expires_at"])]];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"5h 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"5h 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"7d 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
-        [self.inspectorStack addArrangedSubview:[self infoRowWithTitle:@"7d 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"邮箱" value:CPDisplayString(account[@"email"])]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"Token" value:CPRelativeTime(account[@"expires_at"])]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"5h 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"5h 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"7d 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"7d 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
 
         NSStackView *buttonGrid = [[NSStackView alloc] init];
         buttonGrid.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -4408,6 +4455,10 @@ static NSImage *CPMenuBarIconImage(void) {
         self.window.delegate = self;
     }
     [self centerFixedWindowInVisibleScreen];
+    [self seedInitialSnapshotsFromOwner];
+    [self rebuildSettingsPagesSelectingIndex:self.selectedSettingsIndex];
+    [self populateControls];
+    [self renderSettingsSectionAtIndex:self.selectedSettingsIndex];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self refresh:nil];
@@ -4415,6 +4466,24 @@ static NSImage *CPMenuBarIconImage(void) {
         [self scrollAllTabsToTopAfterLayout];
     });
     [self auditButtonsInWindow:self.window context:@"settings"];
+}
+
+- (void)seedInitialSnapshotsFromOwner {
+    NSDictionary *ownerStatus = CPDict(self.owner.statusSnapshot);
+    self.statusSnapshot = ownerStatus;
+
+    NSDictionary *config = CPDict(ownerStatus[@"config"]);
+    self.configSnapshot = config.count ? config : [self defaultConfig];
+
+    if (ownerStatus.count || !self.codexSnapshot.count) {
+        self.codexSnapshot = @{
+            @"enabled": ownerStatus[@"enabled"] ?: @(NO),
+            @"mode": ownerStatus[@"mode"] ?: @"",
+            @"expected": @{
+                @"codex_base_url": ownerStatus[@"codex_expected_base_url"] ?: @"",
+            },
+        };
+    }
 }
 
 - (void)centerFixedWindowInVisibleScreen {
@@ -4714,6 +4783,7 @@ static NSImage *CPMenuBarIconImage(void) {
     }
     [self addSettingsPageWithStack:page selected:YES];
     [self renderSettingsSectionAtIndex:selected];
+    [self scrollAllTabsToTopAfterLayout];
 }
 
 - (NSView *)settingsSidebarView {
@@ -4886,13 +4956,13 @@ static NSImage *CPMenuBarIconImage(void) {
     [NSLayoutConstraint activateConstraints:@[
         [document.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
         [document.heightAnchor constraintGreaterThanOrEqualToAnchor:scroll.contentView.heightAnchor],
-        [stack.topAnchor constraintEqualToAnchor:document.topAnchor constant:12],
+        [stack.topAnchor constraintEqualToAnchor:document.topAnchor constant:8],
         [stack.leadingAnchor constraintEqualToAnchor:document.leadingAnchor constant:16],
         [stack.trailingAnchor constraintEqualToAnchor:document.trailingAnchor constant:-16],
         [stack.widthAnchor constraintEqualToConstant:720],
-        [document.bottomAnchor constraintGreaterThanOrEqualToAnchor:stack.bottomAnchor constant:12],
+        [document.bottomAnchor constraintGreaterThanOrEqualToAnchor:stack.bottomAnchor constant:10],
     ]];
-    NSLayoutConstraint *contentBottom = [document.bottomAnchor constraintEqualToAnchor:stack.bottomAnchor constant:12];
+    NSLayoutConstraint *contentBottom = [document.bottomAnchor constraintEqualToAnchor:stack.bottomAnchor constant:10];
     contentBottom.priority = NSLayoutPriorityDefaultHigh;
     contentBottom.active = YES;
     for (NSView *view in stack.arrangedSubviews) {
@@ -5294,6 +5364,11 @@ static NSImage *CPMenuBarIconImage(void) {
     header.cpBackgroundColor = CPSettingsHeaderBackgroundColor();
     header.cpBorderColor = NSColor.clearColor;
     header.layer.borderWidth = 0;
+    header.layer.cornerRadius = 16;
+    header.layer.masksToBounds = YES;
+    if (@available(macOS 10.13, *)) {
+        header.layer.maskedCorners = kCALayerMinXMaxYCorner;
+    }
     header.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSStackView *textStack = [[NSStackView alloc] init];
@@ -5667,7 +5742,7 @@ static NSImage *CPMenuBarIconImage(void) {
         NSDictionary *status = [self.owner fetchJSONPath:@"/api/status" method:@"GET" timeout:3.0];
         NSDictionary *codex = [self.owner fetchJSONPath:@"/api/codex/proxy" method:@"GET" timeout:3.0];
         NSDictionary *menubar = [self.owner runPythonJSONSync:@[@"menubar-login-status"] rawText:nil];
-        NSDictionary *ownerPayload = [self.owner snapshotPayloadRefreshingQuota:YES
+        NSDictionary *ownerPayload = [self.owner snapshotPayloadRefreshingQuota:NO
                                                              quotaRefreshResult:nil
                                                                     proxyOnline:nil];
         if (!status) {
