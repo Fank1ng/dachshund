@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.6 - 2026-06-20
+
+- Fixed the macOS menu bar login item so it detects stale app paths, rewrites the LaunchAgent when needed, and stays resident after login.
+
 ## v0.7.5 - 2026-06-19
 
 - Fixed the macOS menu bar status and quota rows so light mode uses adaptive system text color.

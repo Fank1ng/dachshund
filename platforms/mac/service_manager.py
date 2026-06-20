@@ -211,6 +211,16 @@ def menubar_login_status() -> dict:
     installed_plist = _installed_plist(MENUBAR_PLIST_PATH)
     installed_args = installed_plist.get("ProgramArguments") or []
     program = _menubar_program()
+    installed_program = Path(str(installed_args[0])).expanduser() if installed_args else None
+    available = program.exists()
+    needs_repair = bool(
+        installed
+        and (
+            not available
+            or not installed_program
+            or not _same_path(installed_program, program)
+        )
+    )
     return {
         "action": "menubar_login_status",
         "supported": sys.platform == "darwin",
@@ -218,11 +228,12 @@ def menubar_login_status() -> dict:
         "plist_path": str(MENUBAR_PLIST_PATH),
         "app_bundle": str(_app_bundle_dir()),
         "program": str(program),
-        "installed_program": str(installed_args[0]) if installed_args else "",
+        "installed_program": str(installed_program) if installed_program else "",
         "installed": installed,
         "loaded": loaded,
         "enabled": installed,
-        "available": program.exists(),
+        "available": available,
+        "needs_repair": needs_repair,
     }
 
 
@@ -234,9 +245,10 @@ def set_menubar_login_item(enabled: bool) -> dict:
         if not program.exists():
             raise RuntimeError(f"control app executable not found: {program}")
         MENUBAR_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _run(["launchctl", "bootout", f"{_domain()}/{MENUBAR_LABEL}"], check=False)
+        _run(["launchctl", "bootout", _domain(), str(MENUBAR_PLIST_PATH)], check=False)
         with open(MENUBAR_PLIST_PATH, "wb") as f:
             plistlib.dump(_menubar_plist(program), f)
-        _run(["launchctl", "bootout", _domain(), str(MENUBAR_PLIST_PATH)], check=False)
         _run(["launchctl", "bootstrap", _domain(), str(MENUBAR_PLIST_PATH)])
     else:
         _run(["launchctl", "bootout", _domain(), str(MENUBAR_PLIST_PATH)], check=False)
@@ -531,7 +543,15 @@ def _app_bundle_dir() -> Path:
     for parent in (source, *source.parents):
         if parent.suffix == ".app" and (parent / "Contents").exists():
             return parent
-    return CONFIG_DIR / "the little dachshund.app"
+    candidates = [
+        Path.home() / "Applications" / "the little dachshund.app",
+        Path("/Applications/the little dachshund.app"),
+        CONFIG_DIR / "the little dachshund.app",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def _menubar_program() -> Path:

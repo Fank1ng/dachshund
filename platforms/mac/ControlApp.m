@@ -6144,11 +6144,14 @@ static NSMenuItem *CPWhiteMenuDisplayItem(NSString *title, NSTextField **labelOu
     }
     if (self.menuBarLoginItemLabel) {
         BOOL menubarEnabled = CPBool(self.menubarLoginSnapshot[@"enabled"]);
+        BOOL menubarNeedsRepair = CPBool(self.menubarLoginSnapshot[@"needs_repair"]);
         NSString *plist = CPString(self.menubarLoginSnapshot[@"plist_path"]);
-        self.menuBarLoginItemLabel.stringValue = menubarEnabled
-            ? @"已开启；登录后会常驻菜单栏，不主动弹出控制中心"
-            : (plist.length ? @"未开启；登录后不会自动显示菜单栏入口" : @"未开启");
-        self.menuBarLoginItemLabel.textColor = menubarEnabled ? NSColor.labelColor : NSColor.secondaryLabelColor;
+        self.menuBarLoginItemLabel.stringValue = menubarNeedsRepair
+            ? @"已开启但路径需修复；点击保存设置重写登录项"
+            : (menubarEnabled
+                ? @"已开启；登录后会常驻菜单栏，不主动弹出控制中心"
+                : (plist.length ? @"未开启；登录后不会自动显示菜单栏入口" : @"未开启"));
+        self.menuBarLoginItemLabel.textColor = menubarNeedsRepair ? NSColor.systemOrangeColor : (menubarEnabled ? NSColor.labelColor : NSColor.secondaryLabelColor);
     }
 }
 
@@ -6238,6 +6241,7 @@ static NSMenuItem *CPWhiteMenuDisplayItem(NSString *title, NSTextField **labelOu
     BOOL canChangeMenuBarLogin = self.selectedSettingsIndex == 4 && self.menuBarLoginItemControl != nil;
     BOOL desiredMenuBarLogin = canChangeMenuBarLogin ? self.menuBarLoginItemControl.state == NSControlStateValueOn : NO;
     BOOL currentMenuBarLogin = CPBool(self.menubarLoginSnapshot[@"enabled"]);
+    BOOL repairMenuBarLogin = CPBool(self.menubarLoginSnapshot[@"needs_repair"]);
     self.statusLabel.stringValue = @"正在保存设置...";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *jsonError = nil;
@@ -6263,7 +6267,7 @@ static NSMenuItem *CPWhiteMenuDisplayItem(NSString *title, NSTextField **labelOu
         }
 
         NSDictionary *menubarResult = nil;
-        if (canChangeMenuBarLogin && desiredMenuBarLogin != currentMenuBarLogin) {
+        if (canChangeMenuBarLogin && (desiredMenuBarLogin != currentMenuBarLogin || (desiredMenuBarLogin && repairMenuBarLogin))) {
             NSString *raw = nil;
             menubarResult = [self.owner runPythonJSONSync:@[desiredMenuBarLogin ? @"enable-menubar-login" : @"disable-menubar-login"] rawText:&raw];
         }
