@@ -1,5 +1,5 @@
 {
-  "port": 8800,
+  "port": 18800,
   "rate_limit_cooldown": 60,
   "rotation_strategy": "most_available",
   "product_mode": "standard",

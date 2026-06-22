@@ -3,7 +3,7 @@ set -e
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-export PYTHONPATH="$MAC_DIR/core:$MAC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/src/core:$MAC_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export CODEX_PROXY_SOURCE_DIR="$ROOT"
 cd "$ROOT"
 python3 - <<'PY'
@@ -16,8 +16,8 @@ import urllib.request
 import codex_config
 import service_manager
 
-STATUS_URL = "http://127.0.0.1:8800/api/status"
-HEALTH_URL = "http://127.0.0.1:8800/api/config"
+STATUS_URL = "http://127.0.0.1:18800/api/status"
+HEALTH_URL = "http://127.0.0.1:18800/api/config"
 
 
 def compact(data):

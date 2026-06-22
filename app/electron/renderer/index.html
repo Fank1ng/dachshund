@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dachshund</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <img id="brandIcon" src="" alt="">
+      <div>
+        <strong>Dachshund</strong>
+        <span id="runtimeLine">127.0.0.1:18800</span>
+      </div>
+    </div>
+    <nav>
+      <button class="tab active" data-tab="overview">总览</button>
+      <button class="tab" data-tab="accounts">账号</button>
+      <button class="tab" data-tab="config">配置</button>
+      <button class="tab" data-tab="logs">日志</button>
+      <button class="tab" data-tab="diagnostics">诊断</button>
+    </nav>
+    <div class="sidebarStatus">
+      <span id="runDot" class="dot"></span>
+      <span id="runText">检查中</span>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1 id="pageTitle">总览</h1>
+        <p id="pageSubtitle">本地账号池代理控制中心</p>
+      </div>
+      <div class="headerActions">
+        <button data-action="repair">启动/修复</button>
+        <button data-action="restart-proxy">重启代理</button>
+        <button id="refreshBtn">刷新</button>
+      </div>
+    </header>
+
+    <section id="notice" class="notice hidden"></section>
+
+    <section id="overview" class="panel active">
+      <div class="metrics">
+        <div class="metric"><span>状态</span><strong id="metricStatus">-</strong></div>
+        <div class="metric"><span>账号</span><strong id="metricAccounts">-</strong></div>
+        <div class="metric"><span>请求</span><strong id="metricRequests">-</strong></div>
+        <div class="metric"><span>版本</span><strong id="metricVersion">-</strong></div>
+      </div>
+      <div class="split">
+        <section>
+          <div class="sectionHead"><h2>配额</h2><button data-api-post="/api/quota/refresh">刷新配额</button></div>
+          <div id="quotaList" class="quotaList"></div>
+        </section>
+        <section>
+          <div class="sectionHead"><h2>Token 统计</h2><span id="tokenSummary">-</span></div>
+          <div id="tokenBars" class="bars"></div>
+          <div id="tokenHeatmap" class="heatmap"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="accounts" class="panel">
+      <div class="toolbar">
+        <input id="accountName" placeholder="account_name" autocomplete="off">
+        <button data-account-action="login-command">复制登录命令</button>
+        <button data-account-action="start-login">开始登录</button>
+        <button data-account-action="import-current">导入当前 Codex 账号</button>
+        <button data-action="scan-accounts">扫描</button>
+      </div>
+      <table>
+        <thead><tr><th>账号</th><th>邮箱</th><th>状态</th><th>令牌</th><th>操作</th></tr></thead>
+        <tbody id="accountRows"></tbody>
+      </table>
+    </section>
+
+    <section id="config" class="panel">
+      <form id="configForm" class="configGrid">
+        <label>产品模式<select name="product_mode"><option value="standard">standard</option><option value="compatibility">compatibility</option><option value="diagnostic">diagnostic</option></select></label>
+        <label>轮换策略<select name="rotation_strategy"><option value="most_available">most_available</option><option value="round_robin">round_robin</option></select></label>
+        <label>端口<input name="port" type="number" min="1024" max="65535"></label>
+        <label>冷却秒数<input name="rate_limit_cooldown" type="number" min="1" max="3600"></label>
+        <label>最大重试<input name="max_retries" type="number" min="1" max="50"></label>
+        <label>配额刷新秒数<input name="quota_refresh_interval" type="number" min="30" max="86400"></label>
+        <label>流式模式<select name="codex_stream_mode"><option value="realtime">realtime</option><option value="buffered">buffered</option><option value="hybrid">hybrid</option></select></label>
+        <label>5h 权重<input name="quota_weight_5h" type="number" min="0" max="1" step="0.05"></label>
+        <label>7d 权重<input name="quota_weight_7d" type="number" min="0" max="1" step="0.05"></label>
+        <label class="check"><input name="quota_tracker_enabled" type="checkbox"> 配额后台刷新</label>
+        <label class="check"><input name="session_affinity_enabled" type="checkbox"> 会话亲和</label>
+      </form>
+      <div class="toolbar">
+        <button id="saveConfig">保存设置</button>
+        <button data-action="enable-codex-proxy">启用 Codex 代理</button>
+        <button data-action="disable-codex-proxy">Codex 直连</button>
+        <button data-action="enable-menubar-login">启用登录项</button>
+        <button data-action="disable-menubar-login">关闭登录项</button>
+      </div>
+    </section>
+
+    <section id="logs" class="panel">
+      <div class="toolbar">
+        <button data-open-path="log_path">打开日志</button>
+        <button id="clearRecent">清空最近请求</button>
+      </div>
+      <div class="split">
+        <section><h2>最近请求</h2><div id="requestList" class="list"></div></section>
+        <section><h2>错误提醒</h2><div id="errorList" class="list"></div></section>
+      </div>
+      <section><h2>操作日志</h2><div id="opLog" class="list"></div></section>
+    </section>
+
+    <section id="diagnostics" class="panel">
+      <div class="toolbar">
+        <button data-action="show-paths">刷新路径</button>
+        <button data-action="apply-update">应用更新/修复</button>
+        <button data-action="repair-open-codex">打开 Codex</button>
+        <button data-open-external="https://github.com/openai/codex">Codex 项目</button>
+      </div>
+      <div id="diagGrid" class="diagGrid"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

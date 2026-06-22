@@ -1,12 +1,15 @@
-# Windows Work Area
+# Windows
 
-This directory contains Windows-only packaging and helper files. The stable
-shared proxy source still lives at the repository root.
+Dachshund uses Task Scheduler for the background proxy and tray login item.
 
-The Windows installer path uses PyInstaller for the GUI and background
-supervisor, plus Inno Setup for the user-level installer. Keep Windows app
-code, PowerShell scripts, installer definitions, and Windows-specific
-service/task helpers here.
+Target runtime directory:
 
-Do not add generated installers, portable builds, copied runtimes, `vendor/`,
-Python framework folders, account data, logs, or token files.
+```text
+%LOCALAPPDATA%\dachshund
+```
+
+Package targets are wired through `electron-builder`:
+
+```powershell
+npm run build:win
+```

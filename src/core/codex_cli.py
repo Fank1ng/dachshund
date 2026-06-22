@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -47,6 +48,20 @@ def find_codex_cli(
         if _is_file(candidate):
             return str(candidate)
     return None
+
+
+def format_login_command(codex_cli: str, target_dir: Path, *, platform_name: Optional[str] = None) -> str:
+    """Return a shell command users can paste to login into an account dir."""
+    platform_name = platform_name or sys.platform
+    if platform_name == "win32":
+        home = _powershell_quote(str(target_dir))
+        cli = _powershell_quote(str(codex_cli))
+        return f"$env:CODEX_HOME={home}; & {cli} login"
+    return f"CODEX_HOME={shlex.quote(str(target_dir))} {shlex.quote(str(codex_cli))} login"
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _env_get(env: Mapping[str, str], key: str) -> str:

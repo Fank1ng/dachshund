@@ -1,53 +1,35 @@
-# Platform File Layout
+# Platform Files
 
-This repository is organized into shared proxy code and platform-specific app
-packaging code.
+## Shared Core
 
-## Shared proxy core
+- `src/core/proxy.py`: aiohttp management API and proxy entrypoint
+- `src/core/proxy_core.py`: upstream proxy behavior
+- `src/core/account_manager.py`: account storage and rotation
+- `src/core/config.py`: runtime config defaults and validation
 
-Shared code lives in `src/core/`:
+## Electron App
 
-- `src/core/proxy.py`
-- `src/core/proxy_core.py`
-- `src/core/account_manager.py`
-- `src/core/quota_tracker.py`
-- `src/core/config.py`
-- `src/core/codex_config.py`
-- `src/core/login_manager.py`
-- `src/core/static/`
+- `app/electron/main.js`: tray, window, IPC, and action bridge
+- `app/electron/preload.js`: renderer API whitelist
+- `app/electron/renderer/`: control center UI
 
-## macOS app and helpers
+## macOS
 
-macOS-only app and packaging files live in `platforms/mac/`:
+- `platforms/mac/control_actions.py`: JSON action layer used by Electron
+- `platforms/mac/service_manager.py`: LaunchAgent and runtime sync helpers
+- `platforms/mac/build_dachshund_app.command`: app and DMG build script
 
-- `platforms/mac/ControlApp.m`
-- `platforms/mac/service_manager.py`
-- `platforms/mac/control_actions.py`
-- `platforms/mac/control_panel.py`
-- `platforms/mac/build_control_app.command`
-- `platforms/mac/build_dmg.command`
-- `platforms/mac/setup_proxy.command`
-- `platforms/mac/start_codex.command`
-- `platforms/mac/open_web.command`
+## Windows
 
-## Windows work area
+- `platforms/windows/README.md`: Electron packaging placeholder
+- Runtime target: `%LOCALAPPDATA%\dachshund`
 
-Windows-only files live in `platforms/windows/`. Do not copy generated app
-bundles, Python frameworks, vendored dependency trees, build outputs, account
-data, or token files into this directory.
+## Linux
 
-Windows packaging uses PyInstaller for executables and Inno Setup for the
-installer.
+- `platforms/linux/deb/`: Debian/Ubuntu package placeholder
+- `platforms/linux/rpm/`: Fedora/RHEL/openSUSE package placeholder
+- Runtime target: `${XDG_CONFIG_HOME:-~/.config}/dachshund`
 
-## Documentation
+## Build Output
 
-Cross-platform and Windows-specific docs live in `docs/`.
-
-- `docs/windows11.md` documents the Windows packaging and usage path.
-- `docs/platform-files.md` documents this platform classification.
-
-## Future migration
-
-Root-level `accounts/`, `config.json`, and `recent_requests.json` are runtime
-data when running from source. They are intentionally separate from `src/core/`
-so source files can move without relocating local account data.
+Generated files stay under `dist/` and are ignored by Git.

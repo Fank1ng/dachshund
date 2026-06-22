@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 import plistlib
 import sqlite3
@@ -74,6 +75,14 @@ from usage_stats import (
 )
 
 usage_stats.USAGE_STATS_FILE = Path(tempfile.mkdtemp()) / "usage_stats.json"
+
+
+def load_module_from(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
 
 
 class ConfigTests(unittest.TestCase):
@@ -228,6 +237,60 @@ class CodexCliLocatorTests(unittest.TestCase):
             self.assertIn("CODEX_CLI_PATH", str(exc.exception))
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_format_login_command_uses_powershell_on_windows(self):
+        command = codex_cli.format_login_command(
+            r"C:\Program Files\Codex\codex.exe",
+            Path(r"C:\Users\me\dachshund\a'b"),
+            platform_name="win32",
+        )
+
+        self.assertEqual(
+            command,
+            r"$env:CODEX_HOME='C:\Users\me\dachshund\a''b'; & 'C:\Program Files\Codex\codex.exe' login",
+        )
+
+    def test_format_login_command_quotes_unix_paths(self):
+        command = codex_cli.format_login_command("/tmp/Codex CLI/codex", Path("/tmp/account one"), platform_name="linux")
+
+        self.assertEqual(command, "CODEX_HOME='/tmp/account one' '/tmp/Codex CLI/codex' login")
+
+
+class CrossPlatformServiceTests(unittest.TestCase):
+    def test_proxy_imports_with_core_fallback_service_manager(self):
+        saved_path = list(sys.path)
+        saved_modules = {name: sys.modules.get(name) for name in ("proxy", "service_manager")}
+        try:
+            sys.modules.pop("proxy", None)
+            sys.modules.pop("service_manager", None)
+            sys.path[:] = [str(ROOT / "src" / "core")]
+            loaded = load_module_from(ROOT / "src" / "core" / "proxy.py", "proxy_without_mac_service")
+            self.assertFalse(loaded.service_manager.status()["supported"])
+        finally:
+            sys.path[:] = saved_path
+            for name, module in saved_modules.items():
+                sys.modules.pop(name, None)
+                if module is not None:
+                    sys.modules[name] = module
+
+    def test_linux_systemd_unit_uses_user_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp, "CODEX_PROXY_CONFIG_DIR": str(Path(tmp) / "dachshund")}):
+                module = load_module_from(ROOT / "platforms" / "linux" / "service_manager.py", "linux_service_manager_test")
+
+        unit = module._systemd_unit()
+        self.assertIn("WantedBy=default.target", unit)
+        self.assertIn(f"Environment=CODEX_PROXY_CONFIG_DIR={module.RUNTIME_DIR}", unit)
+        self.assertIn(f"ExecStart={module._python_executable()} {module.RUNTIME_DIR / 'proxy.py'}", unit)
+
+    def test_windows_schtasks_command_uses_runtime_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp, "CODEX_PROXY_CONFIG_DIR": str(Path(tmp) / "dachshund")}):
+                module = load_module_from(ROOT / "platforms" / "windows" / "service_manager.py", "windows_service_manager_test")
+
+        args = module._create_proxy_task_args()
+        self.assertEqual(args[:6], ["schtasks", "/Create", "/TN", "Dachshund", "/SC", "ONLOGON"])
+        self.assertIn(str(module.RUNTIME_DIR / "proxy.py"), " ".join(args))
 
 
 class AccountTests(unittest.TestCase):
@@ -1075,8 +1138,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": False,
             "needs_repair": True,
             "version_mismatch": True,
-            "migration_required": True,
-            "legacy_running": True,
             "expected_version": "0.6.0",
             "running_version": "0.5.4",
             "source_dir": "/source",
@@ -1087,8 +1148,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": True,
             "needs_repair": False,
             "version_mismatch": False,
-            "migration_required": False,
-            "legacy_running": False,
             "expected_version": "0.6.0",
             "running_version": "0.6.0",
             "source_dir": "/source",
@@ -1125,8 +1184,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": True,
             "needs_repair": False,
             "version_mismatch": False,
-            "migration_required": False,
-            "legacy_running": False,
             "expected_version": "0.6.0",
             "source_dir": "/source",
             "runtime_dir": "/runtime",
@@ -1157,8 +1214,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": True,
             "needs_repair": False,
             "version_mismatch": False,
-            "migration_required": False,
-            "legacy_running": False,
             "expected_version": "0.6.0",
             "running_version": "0.6.0",
             "source_dir": "/source",
@@ -1259,7 +1314,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": True,
             "needs_repair": False,
             "version_mismatch": False,
-            "migration_required": False,
             "restart_required": False,
             "source_dir": "/source",
             "runtime_dir": "/runtime",
@@ -1312,7 +1366,6 @@ class ControlActionsTests(unittest.TestCase):
             "loaded": True,
             "needs_repair": False,
             "version_mismatch": False,
-            "migration_required": False,
             "restart_required": False,
             "source_dir": "/source",
             "runtime_dir": "/runtime",
@@ -1378,18 +1431,8 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
         (source / "static").mkdir(exist_ok=True)
         (source / "static" / "index.html").write_text("static\n")
 
-    def test_migrate_legacy_runtime_copies_without_removing_old_data(self):
-        with tempfile.TemporaryDirectory() as old_tmp, tempfile.TemporaryDirectory() as parent_tmp:
-            old_runtime = Path(old_tmp)
-            new_runtime = Path(parent_tmp) / "xiaolachang"
-            (old_runtime / "accounts" / "a").mkdir(parents=True)
-            (old_runtime / "accounts" / "a" / "auth.json").write_text("{}\n")
-            with mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime), \
-                    mock.patch.object(service_manager, "RUNTIME_DIR", new_runtime):
-                service_manager._migrate_legacy_runtime()
-
-            self.assertTrue((new_runtime / "accounts" / "a" / "auth.json").exists())
-            self.assertTrue((old_runtime / "accounts" / "a" / "auth.json").exists())
+    def test_migrate_legacy_runtime_is_noop_for_isolated_app(self):
+        self.assertFalse(hasattr(service_manager, "_migrate_legacy_runtime"))
 
     def test_sync_runtime_replaces_code_dirs_and_preserves_user_state(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
@@ -1411,7 +1454,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             (runtime / "vendor").mkdir()
             (runtime / "static").mkdir()
             (runtime / "accounts" / "a").mkdir(parents=True)
-            (runtime / "config.json").write_text('{"port": 8800}\n')
+            (runtime / "config.json").write_text('{"port": 18800}\n')
             (runtime / "python" / "bin" / "python3").write_text("old-python\n")
             (runtime / "vendor" / "pkg.txt").write_text("old-vendor\n")
             (runtime / "static" / "index.html").write_text("old-static\n")
@@ -1424,7 +1467,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             self.assertEqual((runtime / "python" / "bin" / "python3").read_text(), "new-python\n")
             self.assertEqual((runtime / "vendor" / "pkg.txt").read_text(), "new-vendor\n")
             self.assertEqual((runtime / "static" / "index.html").read_text(), "new-static\n")
-            self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
+            self.assertEqual((runtime / "config.json").read_text(), '{"port": 18800}\n')
             self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
 
     def test_sync_runtime_staging_failure_preserves_existing_runtime(self):
@@ -1454,7 +1497,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             (source / "VERSION").write_text("0.6.1\n")
             (runtime / "VERSION").write_text("0.6.0\n")
             (source / "config.json").write_text('{"port": 9999}\n')
-            (runtime / "config.json").write_text('{"port": 8800}\n')
+            (runtime / "config.json").write_text('{"port": 18800}\n')
             for dirname in ("python", "static", "vendor"):
                 (source / dirname).mkdir()
                 (runtime / dirname).mkdir()
@@ -1481,7 +1524,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             self.assertEqual((runtime / "python" / "marker.txt").read_text(), "old-python\n")
             self.assertEqual((runtime / "static" / "marker.txt").read_text(), "old-static\n")
             self.assertEqual((runtime / "vendor" / "marker.txt").read_text(), "old-vendor\n")
-            self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
+            self.assertEqual((runtime / "config.json").read_text(), '{"port": 18800}\n')
             self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
 
 
@@ -1574,7 +1617,7 @@ class ProxyStatusTests(unittest.TestCase):
 
         def fake_get(key):
             return {
-                "port": 8800,
+                "port": 18800,
                 "rotation_strategy": "round_robin",
                 "product_mode": "standard",
                 "remote_proxy_mode": "fixed_account",
@@ -3100,9 +3143,9 @@ class CodexConfigTests(unittest.TestCase):
         self.assertTrue(codex_config.status(config_path)["enabled"])
         text = config_path.read_text()
         self.assertIn('model_provider = "codex-account-pool"', text)
-        self.assertIn('chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"', text)
+        self.assertIn('chatgpt_base_url = "http://127.0.0.1:18800"', text)
         self.assertIn('[model_providers.codex-account-pool]', text)
-        self.assertIn('base_url = "http://127.0.0.1:8800/v1"', text)
+        self.assertIn('base_url = "http://127.0.0.1:18800/v1"', text)
         self.assertIn('wire_api = "responses"', text)
         self.assertIn('requires_openai_auth = true', text)
         self.assertIn('supports_websockets = true', text)
@@ -3115,9 +3158,9 @@ class CodexConfigTests(unittest.TestCase):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"
         config_path.write_text(
             'model_provider = "codex-account-pool"\n'
-            'chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"\n'
+            'chatgpt_base_url = "http://127.0.0.1:18800"\n'
             "[model_providers.codex-account-pool]\n"
-            'base_url = "http://127.0.0.1:8800/backend-api/codex"\n'
+            'base_url = "http://127.0.0.1:18800/backend-api/codex"\n'
             'wire_api = "responses"\n'
             "requires_openai_auth = true\n"
             "supports_websockets = false\n"
@@ -3133,9 +3176,9 @@ class CodexConfigTests(unittest.TestCase):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"
         config_path.write_text(
             'model_provider = "codex-account-pool"\n'
-            'chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"\n'
+            'chatgpt_base_url = "http://127.0.0.1:18800"\n'
             "[model_providers.codex-account-pool]\n"
-            'base_url = "http://127.0.0.1:8800/v1"\n'
+            'base_url = "http://127.0.0.1:18800/v1"\n'
             'wire_api = "responses"\n'
             "requires_openai_auth = true\n"
             "supports_websockets = true\n"
@@ -3177,30 +3220,28 @@ class ServiceManagerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XPC_SERVICE_NAME": service_manager.LABEL}):
             self.assertTrue(service_manager._inside_launchagent())
 
-    def test_status_marks_old_launchagent_environment_for_repair(self):
+    def test_status_marks_stale_launchagent_environment_for_repair(self):
         source = Path(tempfile.mkdtemp())
         runtime = Path(tempfile.mkdtemp())
-        app = Path(tempfile.mkdtemp()) / "Codex Proxy Control.app"
-        old_app = Path(tempfile.mkdtemp()) / "Old Codex Proxy Control.app"
-        plist_path = Path(tempfile.mkdtemp()) / "com.fank1ng.codexproxyapi.plist"
+        app = Path(tempfile.mkdtemp()) / "Dachshund.app"
+        stale_app = Path(tempfile.mkdtemp()) / "Stale Dachshund.app"
+        plist_path = Path(tempfile.mkdtemp()) / "com.fank1ng.dachshund.plist"
         (source / "proxy.py").write_text("# source\n")
         (app / "Contents").mkdir(parents=True)
-        (old_app / "Contents").mkdir(parents=True)
+        (stale_app / "Contents").mkdir(parents=True)
         plist_path.write_bytes(plistlib.dumps({
             "Label": service_manager.LABEL,
             "ProgramArguments": [sys.executable, str(runtime / "proxy.py")],
             "WorkingDirectory": str(runtime),
             "EnvironmentVariables": {
                 service_manager.SOURCE_DIR_ENV: str(source / "old-runtime"),
-                service_manager.APP_BUNDLE_ENV: str(old_app),
+                service_manager.APP_BUNDLE_ENV: str(stale_app),
             },
         }))
 
         with mock.patch.object(service_manager, "PLIST_PATH", plist_path), \
-                mock.patch.object(service_manager, "OLD_PLIST_PATH", plist_path.parent / "missing-old.plist"), \
                 mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
                 mock.patch.object(service_manager, "_launchctl_print", return_value=mock.Mock(returncode=0)), \
-                mock.patch.object(service_manager, "_legacy_launchctl_print", return_value=mock.Mock(returncode=3)), \
                 mock.patch.dict(os.environ, {
                     service_manager.SOURCE_DIR_ENV: str(source),
                     service_manager.APP_BUNDLE_ENV: str(app),
@@ -3211,38 +3252,7 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertIn(f"{service_manager.SOURCE_DIR_ENV.lower()}_mismatch", result["repair_reasons"])
         self.assertIn(f"{service_manager.APP_BUNDLE_ENV.lower()}_mismatch", result["repair_reasons"])
         self.assertEqual(result["installed_source_dir"], str(source / "old-runtime"))
-        self.assertEqual(result["installed_app_bundle"], str(old_app))
-
-    def test_status_marks_loaded_legacy_launchagent_as_migration_required(self):
-        source = Path(tempfile.mkdtemp())
-        runtime = Path(tempfile.mkdtemp())
-        old_runtime = Path(tempfile.mkdtemp())
-        plist_dir = Path(tempfile.mkdtemp())
-        plist_path = plist_dir / "com.fank1ng.xiaolachang.plist"
-        old_plist_path = plist_dir / "com.fank1ng.codexproxyapi.plist"
-        (source / "proxy.py").write_text('APP_VERSION = "0.6.0"\n')
-        (old_runtime / "proxy.py").write_text('APP_VERSION = "0.5.4"\n')
-        old_plist_path.write_bytes(plistlib.dumps({
-            "Label": service_manager.OLD_LABEL,
-            "ProgramArguments": [sys.executable, str(old_runtime / "proxy.py")],
-            "WorkingDirectory": str(old_runtime),
-        }))
-
-        with mock.patch.object(service_manager, "PLIST_PATH", plist_path), \
-                mock.patch.object(service_manager, "OLD_PLIST_PATH", old_plist_path), \
-                mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
-                mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime), \
-                mock.patch.object(service_manager, "_launchctl_print", return_value=mock.Mock(returncode=3)), \
-                mock.patch.object(service_manager, "_legacy_launchctl_print", return_value=mock.Mock(returncode=0)), \
-                mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}):
-            result = service_manager.status()
-
-        self.assertTrue(result["legacy_loaded"])
-        self.assertTrue(result["legacy_running"])
-        self.assertTrue(result["migration_required"])
-        self.assertTrue(result["version_mismatch"])
-        self.assertEqual(result["expected_version"], "0.6.0")
-        self.assertEqual(result["running_version"], "0.5.4")
+        self.assertEqual(result["installed_app_bundle"], str(stale_app))
 
     def test_ensure_running_repairs_installed_launchagent_with_stale_environment(self):
         with mock.patch.object(service_manager, "status", return_value={
@@ -3255,12 +3265,12 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertEqual(result, {"installed": True})
         install.assert_called_once_with(sync=False)
 
-    def test_ensure_running_syncs_when_migration_is_required(self):
+    def test_ensure_running_syncs_when_version_mismatch(self):
         with mock.patch.object(service_manager, "status", return_value={
             "installed": False,
             "loaded": False,
             "needs_repair": True,
-            "migration_required": True,
+            "version_mismatch": True,
         }), mock.patch.object(service_manager, "install", return_value={"installed": True}) as install:
             result = service_manager.ensure_running()
 
@@ -3285,33 +3295,17 @@ class ServiceManagerTests(unittest.TestCase):
         runtime = Path(tempfile.mkdtemp())
         self._write_minimal_runtime_source(source)
         (source / "config.json").write_text('{"port": 9999}\n')
-        (runtime / "config.json").write_text('{"port": 8800}\n')
+        (runtime / "config.json").write_text('{"port": 18800}\n')
 
         with mock.patch.object(service_manager, "RUNTIME_DIR", runtime), mock.patch.dict(
             os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}
         ):
             service_manager._sync_runtime_dir()
 
-        self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
-
-    def test_legacy_runtime_migration_copies_credentials_and_keeps_old_dir(self):
-        runtime = Path(tempfile.mkdtemp()) / "xiaolachang"
-        old_runtime = Path(tempfile.mkdtemp()) / "codexproxyapi"
-        account_dir = old_runtime / "accounts" / "main"
-        account_dir.mkdir(parents=True)
-        (account_dir / "auth.json").write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
-        (old_runtime / "proxy.py").write_text('APP_VERSION = "0.5.4"\n')
-
-        with mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
-                mock.patch.object(service_manager, "OLD_RUNTIME_DIR", old_runtime):
-            service_manager._migrate_legacy_runtime()
-
-        self.assertTrue((runtime / "accounts" / "main" / "auth.json").exists())
-        self.assertTrue((old_runtime / "accounts" / "main" / "auth.json").exists())
-        self.assertTrue(old_runtime.exists())
+        self.assertEqual((runtime / "config.json").read_text(), '{"port": 18800}\n')
 
     def test_app_bundle_dir_uses_environment(self):
-        app = Path(tempfile.mkdtemp()) / "Codex Proxy Control.app"
+        app = Path(tempfile.mkdtemp()) / "Dachshund.app"
         (app / "Contents").mkdir(parents=True)
         with mock.patch.dict(os.environ, {service_manager.APP_BUNDLE_ENV: str(app)}):
             self.assertEqual(service_manager._app_bundle_dir(), app)

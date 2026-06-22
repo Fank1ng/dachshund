@@ -14,17 +14,15 @@ from config import CONFIG_DIR
 from runtime_manifest import BUILD_MANIFEST, RUNTIME_MANIFEST, ManifestError, compare_runtime_to_bundle, write_manifest
 from version import DEFAULT_VERSION, app_version
 
-LABEL = "com.fank1ng.xiaolachang"
-MENUBAR_LABEL = "com.fank1ng.xiaolachang.menubar"
-OLD_LABEL = "com.fank1ng.codexproxyapi"
+LABEL = "com.fank1ng.dachshund"
+MENUBAR_LABEL = "com.fank1ng.dachshund.menubar"
 SOURCE_DIR_ENV = "CODEX_PROXY_SOURCE_DIR"
 APP_BUNDLE_ENV = "CODEX_PROXY_APP_BUNDLE"
 PYTHON_ENV = "CODEX_PROXY_PYTHON"
+CONFIG_DIR_ENV = "CODEX_PROXY_CONFIG_DIR"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 MENUBAR_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{MENUBAR_LABEL}.plist"
-OLD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{OLD_LABEL}.plist"
-RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "xiaolachang"
-OLD_RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "codexproxyapi"
+RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "dachshund"
 LOG_PATH = RUNTIME_DIR / "proxy.log"
 COPY_FILES = {
     ".gitignore",
@@ -32,7 +30,6 @@ COPY_FILES = {
     "account_manager.py",
     "build_manifest.json",
     "control_actions.py",
-    "control_panel.py",
     "codex_config.py",
     "config.py",
     "config.json",
@@ -68,32 +65,20 @@ class RuntimeSyncError(RuntimeError):
 
 def status() -> dict:
     loaded = _launchctl_print().returncode == 0
-    legacy_loaded = _legacy_launchctl_print().returncode == 0
     source = _source_dir()
     runtime_is_source = source.resolve() == RUNTIME_DIR.resolve()
     installed_plist = _installed_plist()
-    legacy_plist = _installed_plist(OLD_PLIST_PATH)
     expected_plist = _plist()
     installed_args = installed_plist.get("ProgramArguments") or []
     installed_env = installed_plist.get("EnvironmentVariables") or {}
     installed_program = str(installed_args[1]) if len(installed_args) >= 2 else ""
-    legacy_args = legacy_plist.get("ProgramArguments") or []
-    legacy_program = str(legacy_args[1]) if len(legacy_args) >= 2 else ""
     expected_program = str(RUNTIME_DIR / "proxy.py")
     repair_reasons = _repair_reasons(installed_plist, expected_plist)
     expected_version = _proxy_version(_source_file(source, "proxy.py"))
     running_program = installed_program if loaded else ""
-    if legacy_loaded:
-        running_program = legacy_program or str(OLD_RUNTIME_DIR / "proxy.py")
     running_version = _proxy_version(Path(running_program)) if running_program else ""
     version_mismatch = bool(expected_version and running_version and expected_version != running_version)
-    migration_required = bool(
-        legacy_loaded
-        or (not PLIST_PATH.exists() and OLD_PLIST_PATH.exists())
-        or version_mismatch
-        or (PLIST_PATH.exists() and repair_reasons)
-    )
-    needs_repair = bool((PLIST_PATH.exists() and repair_reasons) or migration_required)
+    needs_repair = bool(version_mismatch or (PLIST_PATH.exists() and repair_reasons))
     manifest = runtime_integrity(source=source, runtime=RUNTIME_DIR)
     menubar = menubar_login_status()
     return {
@@ -108,11 +93,7 @@ def status() -> dict:
         "python": str(_python_executable()),
         "pythonpath": str(_pythonpath()),
         "installed": PLIST_PATH.exists(),
-        "legacy_installed": OLD_PLIST_PATH.exists(),
-        "legacy_runtime_dir": str(OLD_RUNTIME_DIR),
         "loaded": loaded,
-        "legacy_loaded": legacy_loaded,
-        "legacy_running": legacy_loaded,
         "installed_program": installed_program,
         "installed_python": str(installed_args[0]) if installed_args else "",
         "installed_source_dir": str(installed_env.get(SOURCE_DIR_ENV, "")),
@@ -127,7 +108,6 @@ def status() -> dict:
         "manifest_error": manifest.get("error", ""),
         "manifest": manifest,
         "version_mismatch": version_mismatch,
-        "migration_required": migration_required,
         "needs_repair": needs_repair,
         "repair_reasons": repair_reasons,
         "log_path": str(LOG_PATH),
@@ -139,7 +119,6 @@ def status() -> dict:
 def install(*, sync: bool = True, keep_backup: bool = False) -> dict:
     if sys.platform != "darwin":
         raise RuntimeError("LaunchAgent is only supported on macOS")
-    _migrate_legacy_runtime()
     sync_result = None
     if sync or not (RUNTIME_DIR / "proxy.py").exists():
         sync_result = _sync_runtime_dir(keep_backup=keep_backup)
@@ -154,12 +133,6 @@ def install(*, sync: bool = True, keep_backup: bool = False) -> dict:
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(PLIST_PATH, "wb") as f:
         plistlib.dump(_plist(), f)
-
-    # Fully retire the pre-rename service before (re)starting ours so the two
-    # KeepAlive agents stop fighting over port 8800. Safe regardless of whether
-    # we run inside the LaunchAgent: it targets a different label.
-    _remove_legacy_service()
-
     # When called from the Web UI running inside this LaunchAgent, bootout would
     # terminate the process before the HTTP response can reach the browser.
     if not _inside_launchagent():
@@ -194,7 +167,6 @@ def ensure_running() -> dict:
     """Start or repair the LaunchAgent without syncing source files."""
     if sys.platform != "darwin":
         raise RuntimeError("LaunchAgent is only supported on macOS")
-    _migrate_legacy_runtime()
     current = status()
     if current.get("installed") and not current.get("needs_repair"):
         if current.get("loaded"):
@@ -202,7 +174,7 @@ def ensure_running() -> dict:
         else:
             _run(["launchctl", "bootstrap", _domain(), str(PLIST_PATH)], check=False)
         return status()
-    return install(sync=bool(current.get("migration_required") or current.get("version_mismatch")))
+    return install(sync=bool(current.get("version_mismatch")))
 
 
 def menubar_login_status() -> dict:
@@ -265,6 +237,7 @@ def _plist() -> dict:
         "PYTHONUNBUFFERED": "1",
         SOURCE_DIR_ENV: str(_source_dir().resolve()),
         APP_BUNDLE_ENV: str(_app_bundle_dir()),
+        CONFIG_DIR_ENV: str(RUNTIME_DIR),
     }
     pythonpath = _pythonpath()
     if pythonpath:
@@ -292,12 +265,12 @@ def _menubar_plist(program: Path) -> dict:
         "EnvironmentVariables": {
             SOURCE_DIR_ENV: str(_source_dir().resolve()),
             APP_BUNDLE_ENV: str(_app_bundle_dir()),
+            CONFIG_DIR_ENV: str(RUNTIME_DIR),
         },
     }
 
 
 def _sync_runtime_dir(*, keep_backup: bool = False) -> dict:
-    _migrate_legacy_runtime()
     source = _source_dir().resolve()
     target = RUNTIME_DIR.resolve()
     if source == target:
@@ -520,17 +493,17 @@ def _source_dir_entry(source: Path, name: str) -> Path:
 
 
 def _platform_core_dir(source: Path) -> Path:
-    core = source / "platforms" / "mac" / "core"
+    core = source / "src" / "core"
     return core if core.exists() else source
 
 
 def _source_file_candidates(source: Path, name: str) -> tuple[Path, ...]:
-    mac_core = _platform_core_dir(source) / name
+    core = _platform_core_dir(source) / name
     mac = source / "platforms" / "mac" / name
     direct = source / name
     if name == "requirements.txt":
-        return (mac_core, mac, direct, source / "requirements.txt")
-    return (mac_core, mac, direct)
+        return (core, mac, direct, source / "requirements.txt")
+    return (core, mac, direct)
 
 
 def _app_bundle_dir() -> Path:
@@ -544,9 +517,9 @@ def _app_bundle_dir() -> Path:
         if parent.suffix == ".app" and (parent / "Contents").exists():
             return parent
     candidates = [
-        Path.home() / "Applications" / "the little dachshund.app",
-        Path("/Applications/the little dachshund.app"),
-        CONFIG_DIR / "the little dachshund.app",
+        Path.home() / "Applications" / "dachshund.app",
+        Path("/Applications/dachshund.app"),
+        CONFIG_DIR / "dachshund.app",
     ]
     for path in candidates:
         if path.exists():
@@ -557,7 +530,7 @@ def _app_bundle_dir() -> Path:
 def _menubar_program() -> Path:
     app = _app_bundle_dir()
     info = app / "Contents" / "Info.plist"
-    executable = "the little dachshund"
+    executable = "dachshund"
     if info.exists():
         try:
             with open(info, "rb") as f:
@@ -621,46 +594,7 @@ def _pythonpath():
 
 
 def _inside_launchagent() -> bool:
-    return os.environ.get("XPC_SERVICE_NAME") in {LABEL, OLD_LABEL}
-
-
-def _migrate_legacy_runtime() -> None:
-    if not OLD_RUNTIME_DIR.exists() or RUNTIME_DIR.exists():
-        return
-    try:
-        RUNTIME_DIR.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(OLD_RUNTIME_DIR, RUNTIME_DIR, symlinks=True)
-    except Exception:
-        return
-
-
-def _remove_legacy_service() -> None:
-    """Fully retire the pre-rename LaunchAgent and its runtime.
-
-    The old teardown only ran ``launchctl bootout``, leaving the old plist on
-    disk and the old runtime intact. The 0.5.4 KeepAlive agent therefore kept
-    respawning (on login, or when the old Control.app was opened) and fought the
-    new agent for port 8800. Disable it, delete its plist, and move its runtime
-    aside so the old proxy.py can never spawn again.
-    """
-    # Preserve any accounts that only ever lived in the old runtime.
-    _sync_accounts_dir(OLD_RUNTIME_DIR / "accounts", RUNTIME_DIR / "accounts")
-    _run(["launchctl", "bootout", f"{_domain()}/{OLD_LABEL}"], check=False)
-    if OLD_PLIST_PATH.exists():
-        _run(["launchctl", "bootout", _domain(), str(OLD_PLIST_PATH)], check=False)
-    # Persistent override so a stray plist can never be bootstrapped again.
-    _run(["launchctl", "disable", f"{_domain()}/{OLD_LABEL}"], check=False)
-    if OLD_PLIST_PATH.exists():
-        try:
-            OLD_PLIST_PATH.unlink()
-        except OSError:
-            pass
-    if OLD_RUNTIME_DIR.exists():
-        retired = OLD_RUNTIME_DIR.parent / f".{OLD_RUNTIME_DIR.name}.legacy-removed-{int(time.time())}"
-        try:
-            shutil.move(str(OLD_RUNTIME_DIR), str(retired))
-        except OSError:
-            pass
+    return os.environ.get("XPC_SERVICE_NAME") == LABEL
 
 
 def _installed_plist(path: Optional[Path] = None) -> dict:
@@ -700,7 +634,7 @@ def _repair_reasons(installed: dict, expected: dict) -> list[str]:
 
     installed_env = installed.get("EnvironmentVariables") or {}
     expected_env = expected.get("EnvironmentVariables") or {}
-    env_path_keys = (SOURCE_DIR_ENV, APP_BUNDLE_ENV, PYTHON_ENV, "PYTHONPATH")
+    env_path_keys = (SOURCE_DIR_ENV, APP_BUNDLE_ENV, CONFIG_DIR_ENV, PYTHON_ENV, "PYTHONPATH")
     for key in env_path_keys:
         installed_value = installed_env.get(key)
         expected_value = expected_env.get(key)
@@ -742,10 +676,6 @@ def _domain() -> str:
 
 def _launchctl_print() -> subprocess.CompletedProcess:
     return _run(["launchctl", "print", f"{_domain()}/{LABEL}"], check=False)
-
-
-def _legacy_launchctl_print() -> subprocess.CompletedProcess:
-    return _run(["launchctl", "print", f"{_domain()}/{OLD_LABEL}"], check=False)
 
 
 def _menubar_launchctl_print() -> subprocess.CompletedProcess:

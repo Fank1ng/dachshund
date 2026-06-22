@@ -1,0 +1,73 @@
+{
+  "name": "dachshund",
+  "version": "0.1.0",
+  "description": "Dachshund Electron app for the Codex account pool proxy.",
+  "main": "app/electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "start:menubar": "electron . -- --menubar-only",
+    "check": "node --check app/electron/main.js && node --check app/electron/preload.js && node --check app/electron/renderer/app.js",
+    "test": "python3 -m unittest tests.test_core",
+    "build:mac": "platforms/mac/build_dachshund_app.command",
+    "build:linux": "electron-builder --linux deb rpm",
+    "build:win": "electron-builder --win nsis portable"
+  },
+  "build": {
+    "appId": "com.fank1ng.dachshund",
+    "productName": "Dachshund",
+    "directories": {
+      "output": "dist/electron"
+    },
+    "files": [
+      "package.json",
+      "app/electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "src/core",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "VERSION",
+        "to": "runtime/VERSION"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "runtime/requirements.txt"
+      },
+      {
+        "from": "app/platform/control_actions.py",
+        "to": "runtime/control_actions.py"
+      },
+      {
+        "from": "platforms/linux",
+        "to": "runtime/platforms/linux"
+      },
+      {
+        "from": "platforms/windows",
+        "to": "runtime/platforms/windows"
+      }
+    ],
+    "linux": {
+      "target": [
+        "deb",
+        "rpm"
+      ],
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  }
+}

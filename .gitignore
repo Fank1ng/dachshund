@@ -1,7 +1,6 @@
 accounts/
 build/
 dist/
-Codex Proxy Control.app/
 *.app/
 *.dmg
 *.exe
@@ -18,6 +17,7 @@ Codex Proxy Control.app/
 runtime/
 vendor/
 python/
+node_modules/
 .DS_Store
 *.pyc
 __pycache__/

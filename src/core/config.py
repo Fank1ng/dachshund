@@ -16,7 +16,7 @@ CONFIG_DIR = Path(os.environ.get("CODEX_PROXY_CONFIG_DIR") or _default_config_di
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULTS = {
-    "port": 8800,
+    "port": 18800,
     "rate_limit_cooldown": 60,
     "rotation_strategy": "most_available",
     "product_mode": "standard",

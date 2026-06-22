@@ -1,6 +1,6 @@
 {
-  "name": "小腊肠",
-  "short_name": "小腊肠",
+  "name": "Dachshund",
+  "short_name": "Dachshund",
   "description": "Local control dashboard for Codex account pool proxy.",
   "start_url": "/app",
   "scope": "/",

@@ -25,7 +25,7 @@ def proxy_urls() -> dict:
     port = get("port")
     return {
         "openai_base_url": f"http://127.0.0.1:{port}/v1",
-        "chatgpt_base_url": f"http://127.0.0.1:{port}/backend-api/",
+        "chatgpt_base_url": f"http://127.0.0.1:{port}",
         "codex_base_url": f"http://127.0.0.1:{port}/v1",
         "legacy_codex_base_url": f"http://127.0.0.1:{port}/backend-api/codex",
     }

@@ -16,13 +16,27 @@ import urllib.request
 from account_manager import Account, AccountPool, account_dir, validate_account_name
 import codex_config
 import config
+from codex_cli import format_login_command
 from login_manager import find_codex_cli
 import service_manager
 
 
-APP_URL = "http://127.0.0.1:8800/app"
-STATUS_URL = "http://127.0.0.1:8800/api/status"
-HEALTH_URL = "http://127.0.0.1:8800/api/health"
+def api_root() -> str:
+    return f"http://127.0.0.1:{config.get('port')}"
+
+
+def app_url() -> str:
+    return f"{api_root()}/app"
+
+
+def status_url() -> str:
+    return f"{api_root()}/api/status"
+
+
+def health_url() -> str:
+    return f"{api_root()}/api/health"
+
+
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
 CODEX_APP_PATH = Path("/Applications/Codex.app")
 CODEX_CLI_INSTALL_HINT = "请先安装 Codex App，或确保 codex 命令在 PATH 中。"
@@ -34,8 +48,6 @@ KEY_LABELS = {
     "loaded": "后台服务已加载",
     "needs_repair": "需要修复",
     "version_mismatch": "版本不一致",
-    "migration_required": "需要迁移",
-    "legacy_running": "旧后台正在运行",
     "enabled": "已启用",
     "mode": "模式",
     "product_mode": "运行模式",
@@ -190,7 +202,7 @@ def fetch_json_url(url: str, timeout: float = 3.0) -> Optional[dict]:
 
 
 def fetch_api(path: str, *, method: str = "GET", timeout: float = 5.0):
-    url = f"http://127.0.0.1:8800{path}"
+    url = f"{api_root()}{path}"
     try:
         request = urllib.request.Request(url, data=b"" if method != "GET" else None, method=method)
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -200,10 +212,10 @@ def fetch_api(path: str, *, method: str = "GET", timeout: float = 5.0):
 
 
 def proxy_status(timeout: float = 3.0) -> Optional[dict]:
-    health = fetch_json_url(HEALTH_URL, timeout)
+    health = fetch_json_url(health_url(), timeout)
     if health and health.get("running"):
         return health
-    return fetch_json_url(STATUS_URL, timeout)
+    return fetch_json_url(status_url(), timeout)
 
 
 def wait_for_proxy(timeout: float = 25.0, expected_version: Optional[str] = None) -> Optional[dict]:
@@ -248,8 +260,6 @@ def compact(data: dict) -> str:
         "loaded",
         "needs_repair",
         "version_mismatch",
-        "migration_required",
-        "legacy_running",
         "enabled",
         "mode",
         "product_mode",
@@ -359,8 +369,6 @@ def _service_matches_current_app(service: dict, proxy: Optional[dict], expected_
         return False
     if service.get("needs_repair") or service.get("version_mismatch"):
         return False
-    if service.get("migration_required") or service.get("legacy_running") or service.get("legacy_loaded"):
-        return False
     if not service.get("installed") or not service.get("loaded"):
         return False
     if expected_version and proxy.get("version") != expected_version:
@@ -384,8 +392,6 @@ def repair() -> dict:
             "loaded": service.get("loaded"),
             "needs_repair": service.get("needs_repair"),
             "version_mismatch": service.get("version_mismatch"),
-            "migration_required": service.get("migration_required"),
-            "legacy_running": service.get("legacy_running"),
             "manifest_ok": service.get("manifest_ok"),
             "manifest_error": service.get("manifest_error"),
             "manifest": service.get("manifest"),
@@ -412,8 +418,6 @@ def repair() -> dict:
             "loaded": service.get("loaded"),
             "needs_repair": service.get("needs_repair"),
             "version_mismatch": service.get("version_mismatch"),
-            "migration_required": service.get("migration_required"),
-            "legacy_running": service.get("legacy_running"),
             "manifest_ok": service.get("manifest_ok"),
             "manifest_error": service.get("manifest_error"),
             "manifest": service.get("manifest"),
@@ -443,8 +447,6 @@ def repair() -> dict:
         "loaded": service.get("loaded"),
         "needs_repair": service.get("needs_repair"),
         "version_mismatch": service.get("version_mismatch"),
-        "migration_required": service.get("migration_required"),
-        "legacy_running": service.get("legacy_running"),
         "manifest_ok": service.get("manifest_ok"),
         "manifest_error": service.get("manifest_error"),
         "manifest": service.get("manifest"),
@@ -466,7 +468,7 @@ def repair() -> dict:
 
 def repair_open_web() -> dict:
     result = repair()
-    subprocess.run(["open", APP_URL], check=False)
+    subprocess.run(["open", app_url()], check=False)
     return result
 
 
@@ -527,15 +529,15 @@ def _post_update_validation(proxy: Optional[dict], expected_version: str) -> tup
         return False, details, f"proxy did not report expected version {expected_version or '-'}"
     if expected_version and proxy_version != expected_version:
         return False, details, f"proxy_version_mismatch: expected {expected_version}, observed {proxy_version or '-'}"
-    if service.get("needs_repair") or service.get("migration_required") or service.get("version_mismatch"):
+    if service.get("needs_repair") or service.get("version_mismatch"):
         return False, details, f"launchagent_source_mismatch: {service.get('repair_reasons') or 'service needs repair'}"
     expected_program = str(service_manager.RUNTIME_DIR / "proxy.py")
     if service.get("installed_program") and Path(str(service.get("installed_program"))).expanduser().resolve() != Path(expected_program).resolve():
         return False, details, f"launchagent_source_mismatch: {service.get('installed_program')}"
     if not integrity.get("ok"):
         return False, details, f"runtime_manifest_mismatch: {integrity.get('error') or integrity}"
-    token_usage = fetch_json_url("http://127.0.0.1:8800/api/token-usage", timeout=3)
-    token_events = fetch_json_url("http://127.0.0.1:8800/api/token-usage/events?limit=1", timeout=3)
+    token_usage = fetch_json_url(f"{api_root()}/api/token-usage", timeout=3)
+    token_events = fetch_json_url(f"{api_root()}/api/token-usage/events?limit=1", timeout=3)
     usage_diag = proxy.get("usage") if isinstance(proxy.get("usage"), dict) else {}
     details["token_usage_api_ok"] = isinstance(token_usage, dict) and token_usage.get("history_available") is True
     details["token_usage_events_api_ok"] = isinstance(token_events, dict) and isinstance(token_events.get("events"), list)
@@ -693,12 +695,12 @@ def show_paths() -> dict:
             "系统 Python 或 App/运行目录内置 Python",
             "aiohttp（系统安装或运行目录 vendor）",
             "platforms/mac/control_actions.py",
-            "platforms/mac/core/account_manager.py",
-            "platforms/mac/core/codex_config.py",
+            "src/core/account_manager.py",
+            "src/core/codex_config.py",
             "platforms/mac/service_manager.py",
-            "platforms/mac/core/config.py",
-            "platforms/mac/core/proxy.py / platforms/mac/core/proxy_core.py",
-            "platforms/mac/core/static/index.html",
+            "src/core/config.py",
+            "src/core/proxy.py / src/core/proxy_core.py",
+            "src/core/static/index.html",
             "accounts/{name}/auth.json",
             "accounts/{name}/account.json",
         ],
@@ -711,7 +713,7 @@ def scan_accounts() -> dict:
     if proxy:
         try:
             request = urllib.request.Request(
-                "http://127.0.0.1:8800/api/accounts/scan",
+                f"{api_root()}/api/accounts/scan",
                 data=b"",
                 method="POST",
             )
@@ -769,7 +771,7 @@ def login_command(name: str) -> dict:
             "error": "codex_cli_missing",
             "codex_cli_error": CODEX_CLI_INSTALL_HINT,
         }
-    command = f"CODEX_HOME={target_dir} {codex_cli} login"
+    command = format_login_command(codex_cli, target_dir)
     try:
         subprocess.run(["pbcopy"], input=command, text=True, check=False)
     except Exception:
@@ -799,7 +801,7 @@ def start_login(name: str) -> dict:
         }
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    command = f"CODEX_HOME={target_dir} {codex_cli} login"
+    command = format_login_command(codex_cli, target_dir)
     log_path = service_manager.RUNTIME_DIR / "login.log"
     env = {**os.environ, "CODEX_HOME": str(target_dir)}
     with open(log_path, "a") as log_file:
@@ -1046,8 +1048,6 @@ def status() -> dict:
         "manifest_error": service.get("manifest_error"),
         "manifest": service.get("manifest"),
         "version_mismatch": service.get("version_mismatch"),
-        "migration_required": service.get("migration_required"),
-        "legacy_running": service.get("legacy_running"),
         "installed_program": service.get("installed_program"),
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),

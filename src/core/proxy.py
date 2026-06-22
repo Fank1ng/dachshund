@@ -1,7 +1,7 @@
 """Codex Account Pool Proxy — main entry point.
 
 Start with: PYTHONPATH=src/core:platforms/mac python3 src/core/proxy.py
-Web UI:      http://127.0.0.1:8800/app
+Web UI:      http://127.0.0.1:18800/app
 """
 
 import asyncio
@@ -28,6 +28,7 @@ from account_manager import (
 import codex_config
 from config import CONFIG_DIR, ConfigError, load, save, get
 from login_manager import LoginManager, find_codex_cli
+from codex_cli import format_login_command
 from proxy_core import handle as proxy_handle
 from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
@@ -117,7 +118,7 @@ async def api_accounts_add(request: web.Request) -> web.Response:
         return web.json_response({"error": "account already exists"}, status=409)
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    cmd = f'CODEX_HOME={target_dir} {CODE_CLI} login'
+    cmd = format_login_command(CODE_CLI, target_dir)
     return web.json_response({
         "command": cmd,
         "hint": "Run this in your terminal, then refresh accounts.",
@@ -621,7 +622,7 @@ async def api_control_app_required(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "error": "This action moved to the native Control App so the proxy can stay running.",
-            "use": "the little dachshund.app or control_panel.command",
+            "use": "dachshund.app",
         },
         status=410,
     )
