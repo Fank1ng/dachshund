@@ -30,10 +30,8 @@ body {
   grid-template-columns: 240px 1fr;
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--text);
-  background: var(--sidebar-glass);
+  background: transparent;
   overflow: hidden;
-  backdrop-filter: blur(24px) saturate(1.25);
-  -webkit-backdrop-filter: blur(24px) saturate(1.25);
   -webkit-app-region: drag;
 }
 button, input, select, table, .panel, .metric, section, nav, .tip, .toolbar, .headerActions {
@@ -65,7 +63,7 @@ input, select {
   flex-direction: column;
   gap: 18px;
   padding: 64px 14px 18px;
-  border-right: 1px solid var(--sidebar-line);
+  border-right: 0;
   background: var(--sidebar-glass);
   backdrop-filter: blur(24px) saturate(1.25);
   -webkit-backdrop-filter: blur(24px) saturate(1.25);
@@ -123,7 +121,7 @@ main {
   overflow-y: auto;
   background: var(--surface);
   border-top-left-radius: 28px;
-  box-shadow: var(--shadow-soft);
+  box-shadow: inset 1px 0 0 var(--sidebar-line), var(--shadow-soft);
 }
 header {
   min-width: 0;
