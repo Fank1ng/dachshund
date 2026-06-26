@@ -347,12 +347,16 @@ function createWindow({ show = true } = {}) {
 }
 
 function iconImage() {
-  const icon = app.isPackaged
+  const trayIconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "runtime", "static", "icons", "tray-dog-template.png")
+    : path.join(DEV_CORE_DIR, "static", "icons", "tray-dog-template.png");
+  const fallbackIconPath = app.isPackaged
     ? path.join(process.resourcesPath, "runtime", "static", "icons", "dog-head.png")
     : path.join(DEV_CORE_DIR, "static", "icons", "dog-head.png");
+  const icon = fs.existsSync(trayIconPath) ? trayIconPath : fallbackIconPath;
   const image = fs.existsSync(icon) ? nativeImage.createFromPath(icon) : nativeImage.createEmpty();
   const trayIcon = image.isEmpty() ? image : image.resize({ width: 18, height: 18 });
-  trayIcon.setTemplateImage(true);
+  trayIcon.setTemplateImage(false);
   return trayIcon;
 }
 
