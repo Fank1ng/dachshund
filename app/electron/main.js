@@ -276,24 +276,17 @@ function createWindow({ show = true } = {}) {
   return win;
 }
 
-const TRAY_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
-  <defs>
-    <mask id="eyes">
-      <rect width="36" height="36" fill="white"/>
-      <circle cx="14" cy="15.5" r="2.1" fill="black"/>
-      <circle cx="22" cy="15.5" r="2.1" fill="black"/>
-    </mask>
-  </defs>
-  <path fill="black" mask="url(#eyes)" d="M8.3 12.3C4.9 13.9 3 17.4 3.7 21.4c.5 3.2 2.5 5.9 5.8 7.9 1.8-2.3 2.5-6.5 1.8-10.9 1.7-1.7 4-2.6 6.7-2.6s5 .9 6.7 2.6c-.7 4.4 0 8.6 1.8 10.9 3.3-2 5.3-4.7 5.8-7.9.7-4-.9-7.5-4.3-9.1C26.6 8.3 22.8 6 18 6s-8.6 2.3-9.7 6.3Zm3.5 7.2c0-5 2.5-8.2 6.2-8.2s6.2 3.2 6.2 8.2c0 5.2-2.5 8.5-6.2 8.5s-6.2-3.3-6.2-8.5Zm3.3 5.7c1.7 1 4.1 1 5.8 0-.5 1.7-1.5 2.6-2.9 2.6s-2.4-.9-2.9-2.6Z"/>
-</svg>`;
-
 function iconImage() {
-  let image = nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_SVG));
-  if (image.isEmpty()) {
-    image = nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(TRAY_ICON_SVG)}`);
-  }
+  const trayIconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "runtime", "static", "icons", "tray-dog-template.png")
+    : path.join(DEV_CORE_DIR, "static", "icons", "tray-dog-template.png");
+  const fallbackIconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "runtime", "static", "icons", "dog-head.png")
+    : path.join(DEV_CORE_DIR, "static", "icons", "dog-head.png");
+  const iconPath = fs.existsSync(trayIconPath) ? trayIconPath : fallbackIconPath;
+  const image = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
   const trayIcon = image.isEmpty() ? image : image.resize({ width: 18, height: 18 });
-  trayIcon.setTemplateImage(true);
+  trayIcon.setTemplateImage(false);
   return trayIcon;
 }
 
