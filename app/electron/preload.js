@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("dachshund", {
   asset: (name) => ipcRenderer.invoke("app:asset", name),
   openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
   openPath: (key) => ipcRenderer.invoke("app:open-path", key),
+  writeClipboard: (text) => ipcRenderer.invoke("app:clipboard-write", text),
   onStatus: (callback) => {
     ipcRenderer.on("status:changed", (_event, status) => callback(status));
   },

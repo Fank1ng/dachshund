@@ -16,7 +16,18 @@ import urllib.request
 from account_manager import Account, AccountPool, account_dir, validate_account_name
 import codex_config
 import config
-from codex_cli import format_login_command
+from codex_cli import (
+    complete_login_imports,
+    current_log_offset,
+    format_login_command,
+    login_device_auth_args,
+    login_rate_limit_cooldown,
+    login_startup_error_result,
+    login_status_from_state,
+    remove_login_state,
+    wait_for_login_details,
+    write_login_state,
+)
 from login_manager import find_codex_cli
 import service_manager
 
@@ -709,6 +720,7 @@ def show_paths() -> dict:
 
 
 def scan_accounts() -> dict:
+    complete_login_imports(service_manager.RUNTIME_DIR)
     proxy = proxy_status()
     if proxy:
         try:
@@ -737,6 +749,7 @@ def scan_accounts() -> dict:
 
 
 def list_accounts() -> dict:
+    login_results = complete_login_imports(service_manager.RUNTIME_DIR)
     pool = AccountPool()
     pool.scan()
     rows = [
@@ -754,6 +767,7 @@ def list_accounts() -> dict:
         "action": "list_accounts",
         "total_accounts": len(rows),
         "active_accounts": pool.active_count(),
+        "login_status": login_results,
         "accounts": rows,
     }
 
@@ -790,6 +804,9 @@ def start_login(name: str) -> dict:
     auth_path = target_dir / "auth.json"
     if auth_path.exists():
         return {"action": "start_login", "account": safe_name, "error": "account already has auth.json"}
+    cooldown = login_rate_limit_cooldown(service_manager.RUNTIME_DIR, safe_name)
+    if cooldown:
+        return {"action": "start_login", **cooldown}
 
     codex_cli = find_codex_cli()
     if not codex_cli:
@@ -804,10 +821,12 @@ def start_login(name: str) -> dict:
     command = format_login_command(codex_cli, target_dir)
     log_path = service_manager.RUNTIME_DIR / "login.log"
     env = {**os.environ, "CODEX_HOME": str(target_dir)}
-    with open(log_path, "a") as log_file:
+    started_at = time.time()
+    log_offset = current_log_offset(log_path)
+    with open(log_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] starting login for {safe_name}\n")
         process = subprocess.Popen(
-            [codex_cli, "login"],
+            [codex_cli, *login_device_auth_args()],
             cwd=str(service_manager.RUNTIME_DIR),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -815,19 +834,52 @@ def start_login(name: str) -> dict:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    state_path = write_login_state(
+        service_manager.RUNTIME_DIR,
+        account_name=safe_name,
+        account_dir=target_dir,
+        source_auth_path=CODEX_AUTH_PATH,
+        log_path=log_path,
+        started_at=started_at,
+        log_offset=log_offset,
+        pid=process.pid,
+    )
     try:
         subprocess.run(["pbcopy"], input=command, text=True, check=False)
     except Exception:
         pass
+    login_details = wait_for_login_details(log_path, log_offset=log_offset)
+    if not login_details.get("login_url") or not login_details.get("device_code"):
+        startup_error = login_startup_error_result(log_path, account=safe_name, log_offset=log_offset)
+        if startup_error:
+            return {
+                "action": "start_login",
+                "account": safe_name,
+                "account_dir": str(target_dir),
+                "command": command,
+                "log_path": str(log_path),
+                "state_path": str(state_path),
+                "pid": process.pid,
+                **startup_error,
+            }
     return {
         "action": "login_started",
         "account": safe_name,
         "account_dir": str(target_dir),
         "command": command,
         "log_path": str(log_path),
+        "state_path": str(state_path),
         "pid": process.pid,
         "started": True,
+        **login_details,
     }
+
+
+def login_status(name: str) -> dict:
+    safe_name = validate_account_name(name)
+    status = login_status_from_state(service_manager.RUNTIME_DIR, safe_name)
+    status["action"] = "login_status"
+    return status
 
 
 def import_current(name: str) -> dict:
@@ -884,11 +936,13 @@ def delete_account(name: str) -> dict:
     if proxy_status():
         result = fetch_api(f"/api/accounts/{safe_name}", method="DELETE")
         if isinstance(result, dict) and not result.get("error"):
+            state_removed = remove_login_state(service_manager.RUNTIME_DIR, safe_name)
             return {
                 "action": "delete_account",
                 "running": True,
                 "deleted": result.get("deleted") or safe_name,
                 "trashed_to": result.get("trashed_to"),
+                "login_state_removed": state_removed,
             }
 
     target_dir = account_dir(safe_name)
@@ -911,11 +965,13 @@ def delete_account(name: str) -> dict:
     running = bool(proxy_status())
     if running:
         fetch_api("/api/accounts/scan", method="POST")
+    state_removed = remove_login_state(service_manager.RUNTIME_DIR, safe_name)
     return {
         "action": "delete_account_local",
         "running": running,
         "deleted": safe_name,
         "trashed_to": str(trashed),
+        "login_state_removed": state_removed,
     }
 
 
@@ -1167,6 +1223,7 @@ def main() -> None:
             "list-accounts",
             "login-command",
             "start-login",
+            "login-status",
             "import-current",
             "toggle-account",
             "delete-account",
@@ -1203,6 +1260,7 @@ def main() -> None:
         "list-accounts": list_accounts,
         "login-command": lambda: login_command(args.name),
         "start-login": lambda: start_login(args.name),
+        "login-status": lambda: login_status(args.name),
         "import-current": lambda: import_current(args.name),
         "toggle-account": lambda: toggle_account(args.name),
         "delete-account": lambda: delete_account(args.name),

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import runtime_manifest
 from version import APP_VERSION
 
 LABEL = "dachshund"
@@ -28,6 +29,7 @@ class RuntimeSyncError(RuntimeError):
 def status() -> dict:
     active = _run(["systemctl", "--user", "is-active", "--quiet", LABEL], check=False).returncode == 0
     enabled = _run(["systemctl", "--user", "is-enabled", "--quiet", LABEL], check=False).returncode == 0
+    integrity = runtime_integrity()
     return {
         "supported": sys.platform.startswith("linux"),
         "platform": "linux",
@@ -44,8 +46,8 @@ def status() -> dict:
         "running_version": APP_VERSION if active else "",
         "bundle_version": APP_VERSION,
         "runtime_version": APP_VERSION,
-        "manifest_ok": None,
-        "manifest_error": "",
+        "manifest_ok": integrity.get("ok"),
+        "manifest_error": integrity.get("error", ""),
         "log_path": str(LOG_PATH),
         "menubar_login": menubar_login_status(),
         "menubar_login_enabled": menubar_login_status().get("enabled"),
@@ -106,7 +108,30 @@ def set_menubar_login_item(enabled: bool) -> dict:
 
 
 def runtime_integrity(source: Path | None = None, runtime: Path | None = None) -> dict:
-    return {"ok": True, "bundle_version": APP_VERSION, "runtime_version": APP_VERSION}
+    runtime_root = runtime or RUNTIME_DIR
+    source_root = source or _bundle_runtime_dir()
+    try:
+        if (source_root / runtime_manifest.BUILD_MANIFEST).exists() and (runtime_root / runtime_manifest.RUNTIME_MANIFEST).exists():
+            result = runtime_manifest.compare_runtime_to_bundle(source_root, runtime_root)
+            return {
+                **result,
+                "bundle_version": result.get("expected_version") or APP_VERSION,
+                "runtime_version": result.get("observed_version") or "",
+            }
+        if (runtime_root / "proxy.py").exists():
+            observed = runtime_manifest.generate_manifest(
+                runtime_root,
+                manifest_name=runtime_manifest.RUNTIME_MANIFEST,
+            )
+            return {
+                "ok": observed.get("version") == APP_VERSION and not observed.get("missing"),
+                "bundle_version": APP_VERSION,
+                "runtime_version": observed.get("version", ""),
+                "missing": observed.get("missing", []),
+            }
+        return {"ok": False, "bundle_version": APP_VERSION, "runtime_version": "", "error": "runtime not installed"}
+    except Exception as exc:
+        return {"ok": False, "bundle_version": APP_VERSION, "runtime_version": "", "error": str(exc)}
 
 
 def _systemd_unit() -> str:
@@ -136,7 +161,7 @@ def _desktop_entry(exe: str) -> str:
         "[Desktop Entry]",
         "Type=Application",
         "Name=Dachshund",
-        f"Exec={exe} --menubar-only",
+        f"Exec={exe} --tray",
         "X-GNOME-Autostart-enabled=true",
         "",
     ])
@@ -159,10 +184,24 @@ def _sync_runtime_dir() -> None:
             shutil.rmtree(target)
         shutil.copytree(static, target)
     shutil.copy2(Path(__file__), RUNTIME_DIR / "service_manager.py")
+    native_menu = Path(__file__).with_name("native_menu.py")
+    if native_menu.exists():
+        linux_dir = RUNTIME_DIR / "platforms" / "linux"
+        linux_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(native_menu, linux_dir / "native_menu.py")
+    runtime_manifest.write_manifest(RUNTIME_DIR, manifest_name=runtime_manifest.RUNTIME_MANIFEST)
 
 
 def _source_dir() -> Path:
     return Path(os.environ.get(SOURCE_DIR_ENV) or Path(__file__).resolve().parents[2]).expanduser()
+
+
+def _bundle_runtime_dir() -> Path:
+    source = _source_dir()
+    if (source / "proxy.py").exists():
+        return source
+    core = source / "src" / "core"
+    return core if core.is_dir() else source
 
 
 def _python_executable() -> str:

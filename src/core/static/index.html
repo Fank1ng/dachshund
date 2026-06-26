@@ -124,11 +124,11 @@ async function fetchJSON(path, options = {}) {
   try { return JSON.parse(text); } catch { return { error: text || response.statusText }; }
 }
 
-async function refreshAll() {
+async function refreshAll(quotaOverride) {
   const [status, accounts, quota, tokenUsage] = await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/accounts'),
-    fetchJSON('/api/quota'),
+    quotaOverride === undefined ? fetchJSON('/api/quota') : Promise.resolve(quotaOverride),
     fetchJSON('/api/token-usage?daily_days=371'),
   ]);
   renderStatus(status);
@@ -144,7 +144,7 @@ async function refreshQuota() {
   status.textContent = '正在拉取最新额度...';
   try {
     const result = await fetchJSON('/api/quota/refresh', { method: 'POST' });
-    await refreshAll();
+    await refreshAll(result && !result.error && result.quota ? result.quota : undefined);
     const refreshed = Object.values(result.accounts || {}).filter(item => item.refreshed).length;
     status.textContent = refreshed ? `已刷新 ${refreshed} 个账号：${new Date().toLocaleTimeString()}` : '刷新完成，但没有新数据';
   } finally {
@@ -358,9 +358,10 @@ function usageTip(row) {
 
 function quotaSummary(data) {
   if (data?.error) {
+    const note = data.message || data.error || '刷新中';
     return {
-      fiveHour: { value: null, used: null, resetAt: null, note: '刷新中' },
-      sevenDay: { value: null, used: null, resetAt: null, note: '刷新中' },
+      fiveHour: { value: null, used: null, resetAt: null, note },
+      sevenDay: { value: null, used: null, resetAt: null, note },
       fetchedAt: null,
       planType: '',
       unavailable: true,

@@ -1,6 +1,6 @@
 {
   "name": "dachshund",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dachshund Electron app for the Codex account pool proxy.",
   "main": "app/electron/main.js",
   "private": true,
@@ -10,12 +10,13 @@
     "check": "node --check app/electron/main.js && node --check app/electron/preload.js && node --check app/electron/renderer/app.js",
     "test": "python3 -m unittest tests.test_core",
     "build:mac": "platforms/mac/build_dachshund_app.command",
-    "build:linux": "electron-builder --linux deb rpm",
+    "build:linux": "electron-builder --linux dir && ./platforms/linux/build_rpm.sh",
     "build:win": "electron-builder --win nsis portable"
   },
   "build": {
     "appId": "com.fank1ng.dachshund",
     "productName": "Dachshund",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist/electron"
     },
@@ -54,10 +55,38 @@
     ],
     "linux": {
       "target": [
-        "deb",
-        "rpm"
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "executableName": "dachshund",
+      "icon": "src/core/static/icons/icon-512.png",
+      "desktop": {
+        "Name": "Dachshund",
+        "Comment": "Local Codex account pool proxy control center",
+        "StartupWMClass": "Dachshund"
+      },
+      "maintainer": "fank1ng",
+      "synopsis": "Local Codex account pool proxy control center"
+    },
+    "rpm": {
+      "depends": [
+        "python3",
+        "python3-aiohttp",
+        "python3-gobject",
+        "systemd",
+        "xdg-utils"
+      ]
     },
     "win": {
       "target": [

@@ -1,6 +1,7 @@
 const state = {
   data: null,
   operations: [],
+  loginWatch: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -25,6 +26,63 @@ function logOp(action, result) {
   renderOps();
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function loginStatusMessage(status) {
+  if (!status) return "";
+  if (status.error_message) return status.error_message;
+  if (status.error === "rate_limited") return "设备授权被 OpenAI 限流，请等待 10-15 分钟后再试，不要反复点击开始登录。";
+  if (status.state === "expired" || status.error === "expired") return "设备码已过期，请重新开始登录并使用新的验证码。";
+  if (status.error === "device_auth_failed") return "设备授权失败，请确认浏览器已登录 ChatGPT/OpenAI 后重新开始登录。";
+  if (status.error) return status.error;
+  return "";
+}
+
+function loginStartedMessage(result) {
+  const codeText = result?.device_code ? `，验证码：${result.device_code}` : "";
+  const urlText = result?.login_url ? `，登录链接：${result.login_url}` : "";
+  if (result?.open_error) return `登录已启动，打开网页登录失败：${result.open_error}${urlText}${codeText}`;
+  if (result?.copy_error) return `登录页已打开，验证码复制失败：${result.copy_error}${codeText}${urlText}`;
+  if (result?.login_url && result?.device_code) return `登录页已打开，验证码已复制：${result.device_code}`;
+  if (result?.login_url) return `登录页已打开，请查看日志获取验证码：${result.login_url}`;
+  if (result?.started) return `登录已启动，请查看日志：${result.log_path || ""}`;
+  return "完成";
+}
+
+async function waitForLoginImport(account, startedMessage) {
+  if (!account) return;
+  const watch = Symbol(account);
+  state.loginWatch = watch;
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    if (state.loginWatch !== watch) return;
+    const result = await window.dachshund.action("list-accounts", {});
+    const row = (result?.accounts || []).find((item) => item.name === account);
+    const loginStatus = (result?.login_status || []).find((item) => item.account === account);
+    const loginError = loginStatusMessage(loginStatus);
+    if (loginError && (loginStatus?.state === "error" || loginStatus?.state === "expired" || loginStatus?.error)) {
+      state.loginWatch = null;
+      showNotice(loginError, "error");
+      return;
+    }
+    if (row?.has_tokens) {
+      await window.dachshund.action("scan-accounts", {});
+      await refresh();
+      if (state.loginWatch !== watch) return;
+      showNotice(`账号 ${account} 已导入`);
+      state.loginWatch = null;
+      return;
+    }
+    showNotice(`${startedMessage} · 等待授权完成...`);
+  }
+  if (state.loginWatch !== watch) return;
+  state.loginWatch = null;
+  showNotice(`${startedMessage} · 未检测到账号令牌，请确认网页登录验证码已提交`, "error");
+}
+
 async function refresh() {
   showNotice("刷新中...");
   state.data = await window.dachshund.snapshot();
@@ -36,8 +94,29 @@ async function runAction(action, payload = {}) {
   showNotice(`执行 ${action}...`);
   const result = await window.dachshund.action(action, payload);
   logOp(action, result);
-  showNotice(result?.error ? result.error : "完成", result?.error ? "error" : "info");
+  if (action === "start-login" && result?.login_url && !result?.error) {
+    const opened = await window.dachshund.openExternal(result.login_url);
+    if (opened?.error) result.open_error = opened.error;
+  }
+  if (action === "start-login" && result?.device_code && !result?.error) {
+    const copied = await window.dachshund.writeClipboard(result.device_code);
+    if (copied?.error) result.copy_error = copied.error;
+  }
+  const message = result?.error
+    ? (result.error_message || result.error)
+    : action === "start-login"
+      ? loginStartedMessage(result)
+      : action === "delete-account" && result?.deleted
+          ? `账号 ${result.deleted} 已移到 ${result.trashed_to || ".trash"}`
+          : action === "toggle-account" && result?.account
+            ? `账号 ${result.account} 已${result.enabled ? "启用" : "停用"}`
+            : "完成";
+  showNotice(message, result?.error || result?.open_error ? "error" : "info");
   await refresh();
+  if (action === "start-login") {
+    showNotice(message, result?.error || result?.open_error || result?.copy_error ? "error" : "info");
+    if (result?.started && !result?.error) waitForLoginImport(result.account || payload.name, message);
+  }
   return result;
 }
 
@@ -67,7 +146,10 @@ function render() {
 
 function renderQuota() {
   const host = $("#quotaList");
-  const rows = Object.entries(state.data?.quota || {}).filter(([, value]) => value && typeof value === "object");
+  const quota = state.data?.quota || {};
+  const accounts = state.data?.accounts?.accounts || [];
+  const names = accounts.length ? accounts.map((account) => account.name) : Object.keys(quota);
+  const rows = names.map((name) => [name, quota[name]]);
   if (!rows.length) {
     host.innerHTML = `<div class="muted">暂无配额数据</div>`;
     return;
@@ -88,7 +170,10 @@ function renderQuota() {
 }
 
 function quotaSummary(data) {
-  if (data?.error) return { fiveHour: { value: null, note: "刷新中" }, sevenDay: { value: null, note: "刷新中" } };
+  if (data?.error) {
+    const note = data.message || data.error || "刷新中";
+    return { fiveHour: { value: null, note }, sevenDay: { value: null, note } };
+  }
   const rateLimit = data?.rate_limit || {};
   const primary = rateLimit.primary_window || null;
   const secondary = rateLimit.secondary_window || null;
@@ -224,7 +309,7 @@ function renderAccounts() {
         <button data-row-action="refresh-token" data-name="${account.name}">刷新令牌</button>
         <button data-row-action="clear-cooldown" data-name="${account.name}">清冷却</button>
         <button data-row-action="clear-auth-error" data-name="${account.name}">清异常</button>
-        <button data-row-action="delete-account" data-name="${account.name}">删除</button>
+        <button data-delete-account="${account.name}">删除</button>
       </div></td>
     </tr>`;
   }).join("") || `<tr><td colspan="5" class="muted">暂无账号</td></tr>`;
@@ -296,6 +381,49 @@ function accountName() {
   return $("#accountName").value.trim();
 }
 
+function setRowBusy(button, busy) {
+  const row = button.closest("tr");
+  if (!row) return;
+  row.querySelectorAll("button").forEach((item) => {
+    item.disabled = busy;
+  });
+}
+
+async function runRowAction(button) {
+  const action = button.dataset.rowAction;
+  const name = button.dataset.name;
+  if (!action || !name) return;
+  setRowBusy(button, true);
+  try {
+    await runAction(action, { name });
+  } finally {
+    setRowBusy(button, false);
+  }
+}
+
+async function deleteAccount(button) {
+  const name = button.dataset.deleteAccount;
+  if (!name) return;
+  if (!window.confirm(`删除账号 ${name}？账号目录会移到 .trash。`)) return;
+  setRowBusy(button, true);
+  try {
+    const result = await runAction("delete-account", { name });
+    if (!result?.error && result?.deleted === name) {
+      const accounts = state.data?.accounts?.accounts;
+      if (Array.isArray(accounts)) {
+        state.data.accounts.accounts = accounts.filter((account) => account.name !== name);
+        state.data.accounts.total_accounts = state.data.accounts.accounts.length;
+        state.data.accounts.active_accounts = state.data.accounts.accounts.filter((account) => account.enabled && account.has_tokens).length;
+        render();
+      }
+    } else if (!result?.error) {
+      showNotice(`删除账号 ${name} 未返回确认结果`, "error");
+    }
+  } finally {
+    setRowBusy(button, false);
+  }
+}
+
 function bind() {
   $$(".tab").forEach((button) => {
     button.addEventListener("click", () => {
@@ -310,16 +438,31 @@ function bind() {
   document.addEventListener("click", async (event) => {
     const button = event.target.closest("button");
     if (!button) return;
-    if (button.dataset.action) await runAction(button.dataset.action);
-    if (button.dataset.accountAction) await runAction(button.dataset.accountAction, { name: accountName() });
-    if (button.dataset.rowAction) await runAction(button.dataset.rowAction, { name: button.dataset.name });
-    if (button.dataset.apiPost) {
+    if (button.dataset.deleteAccount) {
+      event.preventDefault();
+      event.stopPropagation();
+      await deleteAccount(button);
+    } else if (button.dataset.rowAction) {
+      event.preventDefault();
+      event.stopPropagation();
+      await runRowAction(button);
+    } else if (button.dataset.action) {
+      await runAction(button.dataset.action);
+    } else if (button.dataset.accountAction) {
+      await runAction(button.dataset.accountAction, { name: accountName() });
+    } else if (button.dataset.apiPost) {
       const result = await window.dachshund.api("POST", button.dataset.apiPost);
       logOp(button.dataset.apiPost, result);
+      if (result?.quota && state.data) {
+        state.data.quota = result.quota;
+        render();
+      }
       await refresh();
+    } else if (button.dataset.openPath) {
+      await window.dachshund.openPath(button.dataset.openPath);
+    } else if (button.dataset.openExternal) {
+      await window.dachshund.openExternal(button.dataset.openExternal);
     }
-    if (button.dataset.openPath) await window.dachshund.openPath(button.dataset.openPath);
-    if (button.dataset.openExternal) await window.dachshund.openExternal(button.dataset.openExternal);
   });
   $("#saveConfig").addEventListener("click", () => runAction("set-config", { config: formConfig() }));
   $("#clearRecent").addEventListener("click", async () => {

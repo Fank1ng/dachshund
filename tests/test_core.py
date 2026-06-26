@@ -2,7 +2,9 @@ import json
 import importlib.util
 import os
 import plistlib
+import shutil
 import sqlite3
+import subprocess
 import sys
 import asyncio
 import tempfile
@@ -18,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src" / "core"))
 sys.path.insert(0, str(ROOT / "platforms" / "mac"))
 
 import account_manager
+import config
 import codex_cli
 import codex_config
 import login_manager
@@ -255,6 +258,385 @@ class CodexCliLocatorTests(unittest.TestCase):
 
         self.assertEqual(command, "CODEX_HOME='/tmp/account one' '/tmp/Codex CLI/codex' login")
 
+    def test_extract_login_url_prefers_openai_url_and_strips_punctuation(self):
+        text = "fallback https://example.com/first. Open https://auth.openai.com/device?user_code=ABC123."
+
+        self.assertEqual(codex_cli.extract_login_url(text), "https://auth.openai.com/device?user_code=ABC123")
+
+    def test_wait_for_login_url_reads_log(self):
+        log_path = Path(tempfile.mkdtemp()) / "login.log"
+        log_path.write_text("Visit https://chatgpt.com/auth/device?code=abc,\n")
+
+        self.assertEqual(codex_cli.wait_for_login_url(log_path, timeout=0), "https://chatgpt.com/auth/device?code=abc")
+
+    def test_extract_device_code_from_codex_output(self):
+        text = "Enter this one-time code (expires in 15 minutes)\n   6YO5-Z03D9\n"
+
+        self.assertEqual(codex_cli.extract_device_code(text), "6YO5-Z03D9")
+
+    def test_wait_for_login_details_reads_url_and_device_code(self):
+        log_path = Path(tempfile.mkdtemp()) / "login.log"
+        log_path.write_text("Open https://auth.openai.com/codex/device\nEnter this one-time code\n6YLF-RLFS1\n")
+
+        self.assertEqual(codex_cli.wait_for_login_details(log_path, timeout=0), {
+            "login_url": "https://auth.openai.com/codex/device",
+            "device_code": "6YLF-RLFS1",
+        })
+
+    def test_wait_for_login_details_reads_from_offset(self):
+        log_path = Path(tempfile.mkdtemp()) / "login.log"
+        old = "Open https://auth.openai.com/codex/device\nEnter this one-time code\n6YLF-RLFS1\n"
+        new = "Open https://auth.openai.com/codex/device\nEnter this one-time code\n6ZZ3-QJRGP\n"
+        log_path.write_text(old + new)
+
+        self.assertEqual(codex_cli.wait_for_login_details(log_path, timeout=0, log_offset=len(old.encode())), {
+            "login_url": "https://auth.openai.com/codex/device",
+            "device_code": "6ZZ3-QJRGP",
+        })
+
+    def test_detect_login_error_ignores_normal_device_code_expiry_hint(self):
+        log_path = Path(tempfile.mkdtemp()) / "login.log"
+        log_path.write_text(
+            "Open https://auth.openai.com/codex/device\n"
+            "Enter this one-time code (expires in 15 minutes)\n"
+            "6YO5-Z03D9\n"
+        )
+
+        self.assertEqual(codex_cli.detect_login_error(log_path), "")
+
+    def test_detect_login_error_detects_device_auth_timeout(self):
+        log_path = Path(tempfile.mkdtemp()) / "login.log"
+        log_path.write_text("Error logging in with device code: device auth timed out after 15 minutes\n")
+
+        self.assertEqual(codex_cli.detect_login_error(log_path), "expired")
+
+    def test_remove_login_state_deletes_account_state_only(self):
+        runtime = Path(tempfile.mkdtemp())
+        keep = codex_cli.write_login_state(
+            runtime,
+            account_name="keep",
+            account_dir=runtime / "accounts" / "keep",
+            source_auth_path=runtime / "codex" / "auth.json",
+            log_path=runtime / "login.log",
+            started_at=time.time(),
+        )
+        remove = codex_cli.write_login_state(
+            runtime,
+            account_name="remove",
+            account_dir=runtime / "accounts" / "remove",
+            source_auth_path=runtime / "codex" / "auth.json",
+            log_path=runtime / "login.log",
+            started_at=time.time(),
+        )
+
+        removed = codex_cli.remove_login_state(runtime, "remove")
+
+        self.assertEqual(removed, str(remove))
+        self.assertFalse(remove.exists())
+        self.assertTrue(keep.exists())
+        self.assertEqual(codex_cli.remove_login_state(runtime, "remove"), "")
+
+    def test_login_import_succeeds_when_target_auth_exists(self):
+        root = Path(tempfile.mkdtemp())
+        target = root / "accounts" / "new"
+        target.mkdir(parents=True)
+        auth_path = target / "auth.json"
+        auth_path.write_text('{"tokens": {"access_token": "target"}}\n')
+
+        result = codex_cli.complete_login_import({
+            "account": "new",
+            "account_dir": str(target),
+            "auth_path": str(auth_path),
+            "source_auth_path": str(root / "codex" / "auth.json"),
+            "log_path": str(root / "login.log"),
+            "started_at": time.time(),
+        })
+
+        self.assertEqual(result["state"], "success")
+        self.assertFalse(result["imported"])
+        self.assertTrue(result["has_auth"])
+
+    def test_login_import_copies_new_current_codex_auth(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        target = root / "accounts" / "new"
+        source = root / "codex" / "auth.json"
+        source.parent.mkdir(parents=True)
+        started_at = time.time()
+        state_path = codex_cli.write_login_state(
+            runtime,
+            account_name="new",
+            account_dir=target,
+            source_auth_path=source,
+            log_path=runtime / "login.log",
+            started_at=started_at,
+            pid=123,
+        )
+        source.write_text('{"tokens": {"access_token": "fresh"}}\n')
+        os.utime(source, (started_at + 2, started_at + 2))
+
+        result = codex_cli.login_status_from_state(runtime, "new")
+
+        self.assertEqual(result["state"], "success")
+        self.assertTrue(result["imported"])
+        self.assertEqual((target / "auth.json").read_text(), source.read_text())
+        self.assertEqual(result["state_path"], str(state_path))
+
+    def test_login_import_does_not_recreate_deleted_account_dir(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        target = root / "accounts" / "deleted"
+        source = root / "codex" / "auth.json"
+        source.parent.mkdir(parents=True)
+        target.mkdir(parents=True)
+        started_at = time.time()
+        state_path = codex_cli.write_login_state(
+            runtime,
+            account_name="deleted",
+            account_dir=target,
+            source_auth_path=source,
+            log_path=runtime / "login.log",
+            started_at=started_at,
+            pid=123,
+        )
+        shutil.rmtree(target)
+        source.write_text('{"tokens": {"access_token": "fresh"}}\n')
+        os.utime(source, (started_at + 2, started_at + 2))
+
+        results = codex_cli.complete_login_imports(runtime)
+
+        self.assertEqual(results[0]["state"], "deleted")
+        self.assertEqual(results[0]["error"], "account_deleted")
+        self.assertEqual(results[0]["state_path"], str(state_path))
+        self.assertFalse((target / "auth.json").exists())
+
+    def test_login_import_ignores_old_current_codex_auth(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        target = root / "accounts" / "new"
+        source = root / "codex" / "auth.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"tokens": {"access_token": "old"}}\n')
+        old_mtime = time.time() - 60
+        os.utime(source, (old_mtime, old_mtime))
+
+        codex_cli.write_login_state(
+            runtime,
+            account_name="new",
+            account_dir=target,
+            source_auth_path=source,
+            log_path=runtime / "login.log",
+            started_at=time.time(),
+            pid=os.getpid(),
+        )
+
+        result = codex_cli.login_status_from_state(runtime, "new")
+
+        self.assertEqual(result["state"], "pending")
+        self.assertFalse((target / "auth.json").exists())
+
+    def test_login_status_keeps_normal_device_code_pending(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        log_path = runtime / "login.log"
+        log_path.parent.mkdir(parents=True)
+        log_path.write_text(
+            "[2026-06-25 22:52:13] starting login for new\n"
+            "Open https://auth.openai.com/codex/device\n"
+            "Enter this one-time code (expires in 15 minutes)\n"
+            "6YO5-Z03D9\n"
+        )
+        codex_cli.write_login_state(
+            runtime,
+            account_name="new",
+            account_dir=root / "accounts" / "new",
+            source_auth_path=root / "codex" / "auth.json",
+            log_path=log_path,
+            started_at=time.time(),
+            log_offset=0,
+            pid=os.getpid(),
+        )
+
+        result = codex_cli.login_status_from_state(runtime, "new")
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result["error"], "")
+
+    def test_login_status_errors_when_process_exits_without_auth(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        log_path.write_text("Enter this one-time code\n6YO5-Z03D9\n")
+
+        with mock.patch("codex_cli._login_process_running", return_value=False):
+            result = codex_cli.complete_login_import({
+                "account": "new",
+                "account_dir": str(root / "accounts" / "new"),
+                "source_auth_path": str(root / "codex" / "auth.json"),
+                "log_path": str(log_path),
+                "started_at": time.time(),
+                "pid": 123,
+            })
+
+        self.assertEqual(result["state"], "error")
+        self.assertEqual(result["error"], "login_exited_without_auth")
+        self.assertIn("没有生成账号令牌", result["error_message"])
+
+    def test_login_status_expires_dead_stale_state_without_auth(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        log_path.write_text("Enter this one-time code\n6YO5-Z03D9\n")
+
+        with mock.patch("codex_cli._login_process_running", return_value=False):
+            result = codex_cli.complete_login_import({
+                "account": "new",
+                "account_dir": str(root / "accounts" / "new"),
+                "source_auth_path": str(root / "codex" / "auth.json"),
+                "log_path": str(log_path),
+                "started_at": time.time() - 1200,
+                "pid": 123,
+            })
+
+        self.assertEqual(result["state"], "expired")
+        self.assertEqual(result["error"], "expired")
+
+    def test_login_status_detects_device_auth_failures_and_429(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("Device auth failed: 429 Too Many Requests\n")
+
+        result = codex_cli.complete_login_import({
+            "account": "new",
+            "account_dir": str(root / "accounts" / "new"),
+            "source_auth_path": str(root / "codex" / "auth.json"),
+            "log_path": str(log_path),
+            "started_at": time.time(),
+        })
+
+        self.assertEqual(result["state"], "error")
+        self.assertIn(result["error"], {"rate_limited", "device_auth_failed"})
+
+    def test_login_status_ignores_old_429_before_log_offset(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        old = "[2026-06-25 22:24:04] starting login for new\nError logging in with device code: device auth failed with status 429 Too Many Requests\n"
+        new = "\n[2026-06-25 22:52:13] starting login for new\nEnter this one-time code\n6ZZ3-QJRGP\n"
+        log_path.write_text(old + new)
+
+        result = codex_cli.complete_login_import({
+            "account": "new",
+            "account_dir": str(root / "accounts" / "new"),
+            "source_auth_path": str(root / "codex" / "auth.json"),
+            "log_path": str(log_path),
+            "log_offset": len(old.encode()),
+            "started_at": time.time(),
+        })
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result["error"], "")
+
+    def test_login_status_detects_429_after_log_offset(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        old = "[2026-06-25 22:24:04] starting login for new\nEnter this one-time code\n6YLF-RLFS1\n"
+        new = "\n[2026-06-25 22:52:13] starting login for new\nError logging in with device code: device code request failed with status 429 Too Many Requests\n"
+        log_path.write_text(old + new)
+
+        result = codex_cli.complete_login_import({
+            "account": "new",
+            "account_dir": str(root / "accounts" / "new"),
+            "source_auth_path": str(root / "codex" / "auth.json"),
+            "log_path": str(log_path),
+            "log_offset": len(old.encode()),
+            "started_at": time.time(),
+        })
+
+        self.assertEqual(result["state"], "error")
+        self.assertEqual(result["error"], "rate_limited")
+        self.assertIn("OpenAI", result["error_message"])
+
+    def test_login_startup_error_result_reads_from_offset(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        old = "Error logging in with device code: device code request failed with status 429 Too Many Requests\n"
+        new = "\n[2026-06-25 22:52:13] starting login for new\nError logging in with device code: device auth failed\n"
+        log_path.write_text(old + new)
+
+        result = codex_cli.login_startup_error_result(log_path, account="new", log_offset=len(old.encode()))
+
+        self.assertEqual(result["account"], "new")
+        self.assertEqual(result["error"], "device_auth_failed")
+        self.assertIn("授权失败", result["error_message"])
+
+    def test_login_rate_limit_cooldown_blocks_recent_429(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        target = root / "accounts" / "new"
+        log_path = runtime / "login.log"
+        log_path.parent.mkdir(parents=True)
+        started_at = time.time()
+        log_path.write_text("Error logging in with device code: device code request failed with status 429 Too Many Requests\n")
+        codex_cli.write_login_state(
+            runtime,
+            account_name="new",
+            account_dir=target,
+            source_auth_path=root / "codex" / "auth.json",
+            log_path=log_path,
+            started_at=started_at,
+            log_offset=0,
+            pid=123,
+        )
+
+        cooldown = codex_cli.login_rate_limit_cooldown(runtime, "new", now=started_at + 60)
+
+        self.assertEqual(cooldown["error"], "rate_limited")
+        self.assertGreater(cooldown["retry_after_seconds"], 0)
+        self.assertIn("OpenAI", cooldown["error_message"])
+
+    def test_login_rate_limit_cooldown_allows_after_window(self):
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        target = root / "accounts" / "new"
+        log_path = runtime / "login.log"
+        log_path.parent.mkdir(parents=True)
+        started_at = time.time()
+        log_path.write_text("Error logging in with device code: device code request failed with status 429 Too Many Requests\n")
+        codex_cli.write_login_state(
+            runtime,
+            account_name="new",
+            account_dir=target,
+            source_auth_path=root / "codex" / "auth.json",
+            log_path=log_path,
+            started_at=started_at,
+            log_offset=0,
+            pid=123,
+        )
+
+        cooldown = codex_cli.login_rate_limit_cooldown(runtime, "new", now=started_at + 601)
+
+        self.assertEqual(cooldown, {})
+
+    def test_login_status_legacy_state_uses_last_account_marker(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        log_path.write_text(
+            "[2026-06-25 22:24:04] starting login for new\n"
+            "Error logging in with device code: device auth failed with status 429 Too Many Requests\n"
+            "\n[2026-06-25 22:52:13] starting login for new\n"
+            "Enter this one-time code\n6ZZ3-QJRGP\n"
+        )
+
+        result = codex_cli.complete_login_import({
+            "account": "new",
+            "account_dir": str(root / "accounts" / "new"),
+            "source_auth_path": str(root / "codex" / "auth.json"),
+            "log_path": str(log_path),
+            "started_at": time.time(),
+        })
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result["error"], "")
+
 
 class CrossPlatformServiceTests(unittest.TestCase):
     def test_proxy_imports_with_core_fallback_service_manager(self):
@@ -282,6 +664,33 @@ class CrossPlatformServiceTests(unittest.TestCase):
         self.assertIn("WantedBy=default.target", unit)
         self.assertIn(f"Environment=CODEX_PROXY_CONFIG_DIR={module.RUNTIME_DIR}", unit)
         self.assertIn(f"ExecStart={module._python_executable()} {module.RUNTIME_DIR / 'proxy.py'}", unit)
+
+    def test_linux_autostart_marks_kde_wayland_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp, "CODEX_PROXY_CONFIG_DIR": str(Path(tmp) / "dachshund")}):
+                module = load_module_from(ROOT / "platforms" / "linux" / "service_manager.py", "linux_service_manager_autostart_test")
+
+        entry = module._desktop_entry("/opt/Dachshund/dachshund")
+        self.assertIn("Exec=/opt/Dachshund/dachshund --tray", entry)
+
+    def test_linux_install_syncs_runtime_without_touching_system_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp) / "dachshund"
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp, "CODEX_PROXY_CONFIG_DIR": str(runtime_dir), "CODEX_PROXY_SOURCE_DIR": str(ROOT)}):
+                module = load_module_from(ROOT / "platforms" / "linux" / "service_manager.py", "linux_service_manager_install_test")
+
+                def fake_run(args, *, check=True):
+                    return subprocess.CompletedProcess(args, 1, "", "")
+
+                with mock.patch.object(module, "_run", side_effect=fake_run):
+                    result = module.install(sync=True)
+
+            self.assertTrue(result["installed"])
+            self.assertTrue((runtime_dir / "proxy.py").exists())
+            self.assertTrue((runtime_dir / "service_manager.py").exists())
+            self.assertTrue((runtime_dir / "platforms" / "linux" / "native_menu.py").exists())
+            self.assertTrue((runtime_dir / "runtime_manifest.json").exists())
+            self.assertEqual(result["runtime_dir"], str(runtime_dir))
 
     def test_windows_schtasks_command_uses_runtime_proxy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1019,6 +1428,31 @@ class UsageStatsTests(unittest.TestCase):
 
 
 class ControlActionsTests(unittest.TestCase):
+    def test_renderer_row_actions_are_exclusive_and_confirm_delete(self):
+        text = (ROOT / "app" / "electron" / "renderer" / "app.js").read_text()
+
+        self.assertIn('data-delete-account="${account.name}"', text)
+        self.assertNotIn('data-row-action="delete-account"', text)
+        self.assertIn("async function deleteAccount(button)", text)
+        self.assertIn('await runAction("delete-account", { name });', text)
+        self.assertNotIn('await runAction("toggle-account", { name });', text)
+        self.assertIn('if (button.dataset.rowAction) {', text)
+        self.assertIn("event.stopPropagation();", text)
+        self.assertIn("await runRowAction(button);", text)
+        self.assertIn('} else if (button.dataset.action) {', text)
+        self.assertIn('window.confirm(`删除账号 ${name}？账号目录会移到 .trash。`)', text)
+        self.assertIn("state.data.quota = result.quota;", text)
+        self.assertIn("accounts.length ? accounts.map((account) => account.name) : Object.keys(quota)", text)
+
+    def test_renderer_start_login_opens_browser_and_preserves_fallback_details(self):
+        text = (ROOT / "app" / "electron" / "renderer" / "app.js").read_text()
+
+        self.assertIn('window.dachshund.openExternal(result.login_url)', text)
+        self.assertIn('window.dachshund.writeClipboard(result.device_code)', text)
+        self.assertIn('function loginStartedMessage(result)', text)
+        self.assertIn('登录链接：${result.login_url}', text)
+        self.assertIn('验证码：${result.device_code}', text)
+
     def test_clear_auth_error_local_reenables_account(self):
         old_accounts_dir = account_manager.ACCOUNTS_DIR
         root = Path(tempfile.mkdtemp())
@@ -1047,6 +1481,44 @@ class ControlActionsTests(unittest.TestCase):
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
+    def test_account_without_meta_is_listed_enabled_by_default(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            account_dir = root / "b"
+            account_dir.mkdir(parents=True)
+            (account_dir / "auth.json").write_text(json.dumps({"tokens": {"access_token": "x"}}))
+
+            with mock.patch("control_actions.proxy_status", return_value=None), \
+                    mock.patch("control_actions.complete_login_imports", return_value=[]):
+                result = control_actions.list_accounts()
+
+            self.assertEqual(result["total_accounts"], 1)
+            self.assertEqual(result["accounts"][0]["name"], "b")
+            self.assertTrue(result["accounts"][0]["enabled"])
+            self.assertFalse((account_dir / "account.json").exists())
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_toggle_account_local_persists_disabled_meta(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            account_dir = root / "b"
+            account_dir.mkdir(parents=True)
+            (account_dir / "auth.json").write_text(json.dumps({"tokens": {"access_token": "x"}}))
+
+            with mock.patch("control_actions.proxy_status", return_value=None):
+                result = control_actions.toggle_account("b")
+
+            self.assertFalse(result["enabled"])
+            meta = json.loads((account_dir / "account.json").read_text())
+            self.assertFalse(meta["enabled"])
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
     def test_delete_account_local_moves_account_to_trash(self):
         old_accounts_dir = account_manager.ACCOUNTS_DIR
         root = Path(tempfile.mkdtemp())
@@ -1064,6 +1536,66 @@ class ControlActionsTests(unittest.TestCase):
             self.assertFalse(account_dir.exists())
             self.assertTrue(Path(result["trashed_to"]).exists())
             self.assertEqual(Path(result["trashed_to"]).parent.resolve(), (root / ".trash").resolve())
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_delete_disabled_account_moves_existing_meta_without_reenabling(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            account_dir = root / "b"
+            account_dir.mkdir(parents=True)
+            (account_dir / "auth.json").write_text(json.dumps({"tokens": {"access_token": "x"}}))
+            account = Account("b", account_dir / "auth.json")
+            account.enabled = False
+            account.save_meta()
+
+            with mock.patch("control_actions.proxy_status", return_value=None), \
+                    mock.patch.object(control_actions.time, "strftime", return_value="20260626-004200"):
+                result = control_actions.delete_account("b")
+
+            trashed = Path(result["trashed_to"])
+            self.assertEqual(trashed.name, "b-20260626-004200")
+            self.assertFalse(account_dir.exists())
+            self.assertTrue((trashed / "auth.json").exists())
+            self.assertFalse(json.loads((trashed / "account.json").read_text())["enabled"])
+            self.assertFalse((root / "b" / "account.json").exists())
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_delete_account_removes_account_from_next_list(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            account_dir = root / "b"
+            account_dir.mkdir(parents=True)
+            (account_dir / "auth.json").write_text(json.dumps({"tokens": {"access_token": "x"}}))
+            state_path = codex_cli.write_login_state(
+                runtime,
+                account_name="b",
+                account_dir=account_dir,
+                source_auth_path=Path(tempfile.mkdtemp()) / "auth.json",
+                log_path=runtime / "login.log",
+                started_at=time.time(),
+            )
+
+            with mock.patch("control_actions.proxy_status", return_value=None), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", runtime):
+                delete_result = control_actions.delete_account("b")
+            with mock.patch("control_actions.proxy_status", return_value=None), \
+                    mock.patch("control_actions.complete_login_imports", return_value=[]):
+                list_result = control_actions.list_accounts()
+
+            self.assertEqual(delete_result["deleted"], "b")
+            self.assertFalse((root / "b").exists())
+            self.assertEqual(delete_result["login_state_removed"], str(state_path))
+            self.assertFalse(state_path.exists())
+            self.assertTrue(Path(delete_result["trashed_to"]).exists())
+            self.assertEqual(list_result["accounts"], [])
+            self.assertEqual(list_result["total_accounts"], 0)
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
@@ -1086,16 +1618,240 @@ class ControlActionsTests(unittest.TestCase):
         try:
             with mock.patch("control_actions.find_codex_cli", return_value="/tmp/codex"), \
                     mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch("control_actions.wait_for_login_details", return_value={
+                        "login_url": "https://auth.openai.com/device",
+                        "device_code": "6YLF-RLFS1",
+                    }) as wait_for_details, \
                     mock.patch("control_actions.subprocess.Popen", return_value=fake_process) as popen:
                 result = control_actions.start_login("new_account")
 
             self.assertEqual(result["action"], "login_started")
             self.assertEqual(result["account"], "new_account")
+            self.assertEqual(result["login_url"], "https://auth.openai.com/device")
+            self.assertEqual(result["device_code"], "6YLF-RLFS1")
+            self.assertTrue(result["started"])
+            self.assertNotIn("error", result)
+            self.assertTrue((runtime / "login-state" / "new_account.json").exists())
+            self.assertEqual(result["state_path"], str(runtime / "login-state" / "new_account.json"))
+            state = json.loads((runtime / "login-state" / "new_account.json").read_text())
+            self.assertEqual(state["log_offset"], 0)
             self.assertTrue((root / "new_account").exists())
             args, kwargs = popen.call_args_list[0]
-            self.assertEqual(args[0], ["/tmp/codex", "login"])
+            self.assertEqual(args[0], ["/tmp/codex", "login", "--device-auth"])
             self.assertEqual(Path(kwargs["env"]["CODEX_HOME"]).resolve(), (root / "new_account").resolve())
             self.assertEqual(kwargs["cwd"], str(runtime))
+            wait_for_details.assert_called_once_with(runtime / "login.log", log_offset=0)
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_start_login_reports_immediate_429_without_waiting_state(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_control_actions_for_test")
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        fake_process = mock.Mock(pid=5678)
+
+        def write_429(log_path, *, log_offset):
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                log_file.write("Error logging in with device code: device code request failed with status 429 Too Many Requests\n")
+            return {"login_url": "", "device_code": ""}
+
+        try:
+            with mock.patch.object(module.service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(module, "find_codex_cli", return_value="/tmp/codex"), \
+                    mock.patch.object(module, "wait_for_login_details", side_effect=write_429), \
+                    mock.patch.object(module.subprocess, "Popen", return_value=fake_process):
+                result = module.start_login("new_account")
+
+            self.assertEqual(result["action"], "start_login")
+            self.assertEqual(result["account"], "new_account")
+            self.assertEqual(result["error"], "rate_limited")
+            self.assertIn("OpenAI", result["error_message"])
+            self.assertNotIn("started", result)
+            self.assertEqual(result["state_path"], str(runtime / "login-state" / "new_account.json"))
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_import_current_scans_after_copy(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_import_current_test")
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        source = Path(tempfile.mkdtemp()) / "auth.json"
+        source.write_text('{"tokens": {"access_token": "fresh"}}\n')
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            with mock.patch.object(module, "CODEX_AUTH_PATH", source), \
+                    mock.patch.object(module, "scan_accounts", return_value={"action": "scan_accounts_local"}) as scan:
+                result = module.import_current("current_copy")
+
+            self.assertEqual(result["action"], "import_current")
+            self.assertEqual(result["account"], "current_copy")
+            self.assertEqual((root / "current_copy" / "auth.json").read_text(), source.read_text())
+            scan.assert_called_once_with()
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_defaults_to_service_runtime_without_config_env(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        old_config_dir = config.CONFIG_DIR
+        old_config_path = config.CONFIG_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "dachshund"
+            account_dir = runtime / "accounts" / "a"
+            account_dir.mkdir(parents=True)
+            (account_dir / "auth.json").write_text('{"tokens": {"access_token": "x"}}\n')
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "CODEX_PROXY_CONFIG_DIR"
+            }
+            env["XDG_CONFIG_HOME"] = tmp
+            try:
+                with mock.patch.dict(os.environ, env, clear=True):
+                    module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_default_runtime_test")
+                    with mock.patch.object(module, "complete_login_imports", return_value=[]):
+                        result = module.list_accounts()
+
+                self.assertEqual(module.config.CONFIG_PATH, runtime / "config.json")
+                self.assertEqual(module.account_manager.ACCOUNTS_DIR, runtime / "accounts")
+                self.assertEqual(result["total_accounts"], 1)
+                self.assertEqual(result["accounts"][0]["name"], "a")
+            finally:
+                account_manager.ACCOUNTS_DIR = old_accounts_dir
+                config.CONFIG_DIR = old_config_dir
+                config.CONFIG_PATH = old_config_path
+
+    def test_cross_platform_delete_fallback_matches_mac_and_rescans(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_delete_account_test")
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        runtime = root / "runtime"
+        account_manager.ACCOUNTS_DIR = root
+        account_dir = root / "a"
+        account_dir.mkdir(parents=True)
+        (account_dir / "auth.json").write_text('{"tokens": {"access_token": "x"}}\n')
+        state_path = codex_cli.write_login_state(
+            runtime,
+            account_name="a",
+            account_dir=account_dir,
+            source_auth_path=Path(tempfile.mkdtemp()) / "auth.json",
+            log_path=runtime / "login.log",
+            started_at=time.time(),
+        )
+        trash = root / ".trash"
+        trash.mkdir()
+        existing = trash / "a-20260626-001500"
+        existing.mkdir()
+        try:
+            with mock.patch.object(module, "proxy_status", side_effect=[{"running": True}, {"running": True}]), \
+                    mock.patch.object(module, "fetch_api", side_effect=[{"error": "request failed"}, []]) as fetch_api, \
+                    mock.patch.object(module.service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(module.time, "strftime", return_value="20260626-001500"):
+                result = module.delete_account("a")
+
+            self.assertEqual(result["action"], "delete_account_local")
+            self.assertTrue(result["running"])
+            self.assertEqual(result["deleted"], "a")
+            self.assertEqual(Path(result["trashed_to"]).name, "a-20260626-001500-1")
+            self.assertEqual(result["login_state_removed"], str(state_path))
+            self.assertFalse(state_path.exists())
+            self.assertFalse(account_dir.exists())
+            self.assertTrue((trash / "a-20260626-001500-1").exists())
+            self.assertEqual(fetch_api.call_args_list[0].args[0], "/api/accounts/a")
+            self.assertEqual(fetch_api.call_args_list[1].args[0], "/api/accounts/scan")
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_delete_move_failure_returns_error(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_delete_move_failure_test")
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        account_dir = root / "a"
+        account_dir.mkdir(parents=True)
+        (account_dir / "auth.json").write_text('{"tokens": {"access_token": "x"}}\n')
+        try:
+            with mock.patch.object(module, "proxy_status", side_effect=[None, None]), \
+                    mock.patch.object(module.shutil, "move", side_effect=OSError("read-only file system")):
+                result = module.delete_account("a")
+
+            self.assertEqual(result["action"], "delete_account_local")
+            self.assertFalse(result["running"])
+            self.assertEqual(result["account"], "a")
+            self.assertIn("read-only", result["error"])
+            self.assertTrue(account_dir.exists())
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_clear_auth_error_requires_auth_json(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_clear_auth_missing_test")
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        try:
+            with mock.patch.object(module, "proxy_status", return_value=None):
+                result = module.clear_auth_error("missing")
+
+            self.assertEqual(result["action"], "clear_auth_error_local")
+            self.assertFalse(result["running"])
+            self.assertEqual(result["account"], "missing")
+            self.assertEqual(result["error"], "account not found")
+            self.assertFalse((root / "missing" / "account.json").exists())
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_cross_platform_clear_cooldown_offline_uses_mac_message(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_clear_cooldown_test")
+
+        with mock.patch.object(module, "proxy_status", return_value=None):
+            result = module.clear_cooldown("a")
+
+        self.assertEqual(result["action"], "clear_cooldown")
+        self.assertFalse(result["running"])
+        self.assertIn("in-memory", result["error"])
+
+    def test_cross_platform_set_config_marks_user_set_flags(self):
+        module = load_module_from(ROOT / "app" / "platform" / "control_actions.py", "cross_platform_set_config_test")
+        config_path = Path(tempfile.mkdtemp()) / "config.json"
+        with mock.patch.object(module.config, "CONFIG_PATH", config_path):
+            result = module.set_config(json.dumps({
+                "quota_tracker_enabled": False,
+                "codex_stream_mode": "hybrid",
+            }))
+
+        self.assertTrue(result["updated"])
+        self.assertFalse(result["config"]["quota_tracker_enabled"])
+        self.assertTrue(result["config"]["quota_tracker_user_set"])
+        self.assertEqual(result["config"]["codex_stream_mode"], "hybrid")
+        self.assertTrue(result["config"]["codex_stream_mode_user_set"])
+
+    def test_start_login_does_not_launch_during_rate_limit_cooldown(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        log_path = runtime / "login.log"
+        log_path.write_text("Error logging in with device code: device code request failed with status 429 Too Many Requests\n")
+        codex_cli.write_login_state(
+            runtime,
+            account_name="new_account",
+            account_dir=root / "new_account",
+            source_auth_path=Path(tempfile.mkdtemp()) / "auth.json",
+            log_path=log_path,
+            started_at=time.time(),
+            log_offset=0,
+            pid=123,
+        )
+        try:
+            with mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch("control_actions.find_codex_cli", return_value="/tmp/codex"), \
+                    mock.patch("control_actions.subprocess.Popen") as popen:
+                result = control_actions.start_login("new_account")
+
+            self.assertEqual(result["error"], "rate_limited")
+            self.assertIn("OpenAI", result["error_message"])
+            popen.assert_not_called()
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
@@ -1275,6 +2031,7 @@ class ControlActionsTests(unittest.TestCase):
         self.assertFalse(result["rolled_back"])
         self.assertEqual(result["error"], "update already in progress")
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS LaunchAgent validation")
     def test_apply_update_rolls_back_when_expected_version_never_starts(self):
         backup = Path(tempfile.mkdtemp()) / "backup"
         backup.mkdir()
@@ -1590,6 +2347,46 @@ class TrashTests(unittest.TestCase):
     def test_trash_entry_rejects_path_like_name(self):
         self.assertIsNone(proxy._trash_entry("../x-20260515-120102"))
 
+    def test_delete_account_uses_unique_trash_path(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        old_trash_dir = proxy.TRASH_DIR
+        old_config_dir = proxy.CONFIG_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        proxy.TRASH_DIR = root / ".trash"
+        proxy.CONFIG_DIR = root
+        account_dir = root / "a"
+        account_dir.mkdir(parents=True)
+        (account_dir / "auth.json").write_text("{}\n")
+        state_path = codex_cli.write_login_state(
+            root,
+            account_name="a",
+            account_dir=account_dir,
+            source_auth_path=Path(tempfile.mkdtemp()) / "auth.json",
+            log_path=root / "login.log",
+            started_at=time.time(),
+        )
+        proxy.TRASH_DIR.mkdir()
+        (proxy.TRASH_DIR / "a-20260626-003000").mkdir()
+        request = mock.Mock()
+        request.match_info = {"name": "a"}
+        try:
+            with mock.patch.object(proxy.time, "strftime", return_value="20260626-003000"), \
+                    mock.patch.object(proxy.pool, "scan") as scan:
+                response = asyncio.run(proxy.api_accounts_delete(request))
+
+            data = json.loads(response.text)
+            self.assertEqual(data["deleted"], "a")
+            self.assertEqual(Path(data["trashed_to"]).name, "a-20260626-003000-1")
+            self.assertEqual(data["login_state_removed"], str(state_path))
+            self.assertFalse(state_path.exists())
+            self.assertTrue((proxy.TRASH_DIR / "a-20260626-003000-1").exists())
+            scan.assert_called_once_with()
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+            proxy.TRASH_DIR = old_trash_dir
+            proxy.CONFIG_DIR = old_config_dir
+
 
 class ProxyStatusTests(unittest.TestCase):
     def test_app_disables_request_body_auto_decompression(self):
@@ -1686,6 +2483,38 @@ class ProxyStatusTests(unittest.TestCase):
         self.assertTrue(data["refreshed"])
         self.assertEqual(data["accounts"]["a"]["fetched_at"], 123)
         refresh.assert_called_once_with(proxy.pool)
+
+    def test_quota_refresh_api_returns_display_snapshot(self):
+        old_accounts_dir = proxy.ACCOUNTS_DIR
+        old_accounts = proxy.pool.accounts
+        root = Path(tempfile.mkdtemp())
+        account = Account("a", root / "a" / "auth.json")
+        proxy.ACCOUNTS_DIR = root
+        proxy.pool.accounts = [account]
+
+        async def fake_refresh(pool):
+            quota_dir = root / "a"
+            quota_dir.mkdir(parents=True)
+            (quota_dir / "quota.json").write_text(json.dumps({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12,
+                    },
+                },
+                "_fetched_at": 123,
+            }))
+            return {"a": {"refreshed": True, "fetched_at": 123}}
+
+        try:
+            with mock.patch("proxy.refresh_quota_once", side_effect=fake_refresh):
+                response = asyncio.run(proxy.api_quota_refresh(mock.Mock()))
+            data = json.loads(response.text)
+            self.assertTrue(data["refreshed"])
+            self.assertEqual(data["accounts"]["a"]["fetched_at"], 123)
+            self.assertEqual(data["quota"]["a"]["rate_limit"]["primary_window"]["used_percent"], 12)
+        finally:
+            proxy.ACCOUNTS_DIR = old_accounts_dir
+            proxy.pool.accounts = old_accounts
 
 
 class _FakeChunkContent:
@@ -3220,6 +4049,7 @@ class ServiceManagerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XPC_SERVICE_NAME": service_manager.LABEL}):
             self.assertTrue(service_manager._inside_launchagent())
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS LaunchAgent status")
     def test_status_marks_stale_launchagent_environment_for_repair(self):
         source = Path(tempfile.mkdtemp())
         runtime = Path(tempfile.mkdtemp())
@@ -3254,6 +4084,7 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertEqual(result["installed_source_dir"], str(source / "old-runtime"))
         self.assertEqual(result["installed_app_bundle"], str(stale_app))
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS LaunchAgent ensure_running")
     def test_ensure_running_repairs_installed_launchagent_with_stale_environment(self):
         with mock.patch.object(service_manager, "status", return_value={
             "installed": True,
@@ -3265,6 +4096,7 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertEqual(result, {"installed": True})
         install.assert_called_once_with(sync=False)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS LaunchAgent ensure_running")
     def test_ensure_running_syncs_when_version_mismatch(self):
         with mock.patch.object(service_manager, "status", return_value={
             "installed": False,

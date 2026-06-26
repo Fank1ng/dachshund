@@ -1,9 +1,37 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage } = require("electron");
+const ORIGINAL_XDG_SESSION_TYPE = String(process.env.XDG_SESSION_TYPE || "").toLowerCase();
+const ORIGINAL_XDG_DESKTOP = `${process.env.XDG_CURRENT_DESKTOP || ""}:${process.env.XDG_SESSION_DESKTOP || ""}`.toLowerCase();
+const WRAPPER_KDE_WAYLAND = process.env.DACHSHUND_KDE_WAYLAND === "1";
+const FORCE_NATIVE_WAYLAND = process.env.DACHSHUND_NATIVE_WAYLAND === "1";
+const IS_KDE_WAYLAND = process.platform === "linux"
+  && (WRAPPER_KDE_WAYLAND || (ORIGINAL_XDG_SESSION_TYPE === "wayland" && /\b(kde|plasma)\b/.test(ORIGINAL_XDG_DESKTOP)));
+const FORCE_ENABLE_TRAY = process.env.DACHSHUND_ENABLE_TRAY === "1";
+const USE_XWAYLAND = IS_KDE_WAYLAND && !FORCE_NATIVE_WAYLAND && process.env.DACHSHUND_FORCE_XWAYLAND === "1";
+const USE_NATIVE_WAYLAND = IS_KDE_WAYLAND && !USE_XWAYLAND;
+
+if (USE_XWAYLAND) {
+  process.env.DACHSHUND_KDE_WAYLAND = "1";
+  process.env.GDK_BACKEND = "x11";
+  process.env.ELECTRON_OZONE_PLATFORM_HINT = "x11";
+  delete process.env.WAYLAND_DISPLAY;
+  delete process.env.WAYLAND_SOCKET;
+  process.env.XDG_SESSION_TYPE = "x11";
+  process.env.DESKTOP_SESSION = "plasma";
+}
+
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage, clipboard } = require("electron");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { pathToFileURL } = require("url");
+
+if (USE_XWAYLAND) app.commandLine.appendSwitch("ozone-platform", "x11");
+if (USE_NATIVE_WAYLAND) app.commandLine.appendSwitch("ozone-platform", "wayland");
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
 
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const MAC_DIR = path.join(PROJECT_ROOT, "platforms", "mac");
@@ -15,6 +43,7 @@ const ACCOUNT_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const NAME_ACTIONS = new Set([
   "login-command",
   "start-login",
+  "login-status",
   "import-current",
   "toggle-account",
   "delete-account",
@@ -99,6 +128,15 @@ let tray = null;
 let win = null;
 let lastStatus = null;
 let lastQuota = null;
+let trayStatusTimer = null;
+
+function shouldSkipTray() {
+  return IS_KDE_WAYLAND && !FORCE_ENABLE_TRAY;
+}
+
+function shouldUseNativeKdeMenu() {
+  return IS_KDE_WAYLAND && !FORCE_ENABLE_TRAY;
+}
 
 function runtimeDir() {
   if (process.platform === "darwin" && !app.isPackaged) return MAC_DIR;
@@ -120,6 +158,13 @@ function appBundlePath() {
   return path.resolve(process.execPath, "../../..");
 }
 
+function appExecutablePath() {
+  if (app.isPackaged && process.platform === "linux" && fs.existsSync("/usr/bin/dachshund")) {
+    return "/usr/bin/dachshund";
+  }
+  return process.execPath;
+}
+
 function helperEnv() {
   const env = { ...process.env, PYTHONUNBUFFERED: "1" };
   const platformPath = app.isPackaged
@@ -128,12 +173,12 @@ function helperEnv() {
   if (app.isPackaged) {
     env.CODEX_PROXY_SOURCE_DIR = path.join(process.resourcesPath, "runtime");
     env.CODEX_PROXY_APP_BUNDLE = appBundlePath();
-    env.CODEX_PROXY_APP_EXECUTABLE = process.execPath;
+    env.CODEX_PROXY_APP_EXECUTABLE = appExecutablePath();
     env.CODEX_PROXY_CONFIG_DIR = app.getPath("userData");
     env.PYTHONPATH = [path.join(process.resourcesPath, "runtime"), platformPath, env.PYTHONPATH].filter(Boolean).join(path.delimiter);
   } else {
     env.CODEX_PROXY_SOURCE_DIR = PROJECT_ROOT;
-    env.CODEX_PROXY_APP_EXECUTABLE = process.execPath;
+    env.CODEX_PROXY_APP_EXECUTABLE = appExecutablePath();
     env.CODEX_PROXY_CONFIG_DIR = app.getPath("userData");
     env.PYTHONPATH = [DEV_CORE_DIR, platformPath, PROJECT_ROOT, env.PYTHONPATH].filter(Boolean).join(path.delimiter);
   }
@@ -186,6 +231,26 @@ function runAction(action, payload = {}) {
       }
     });
   });
+}
+
+function openWithXdg(target) {
+  return new Promise((resolve) => {
+    execFile("xdg-open", [target], { env: helperEnv(), timeout: 15000 }, (error, _stdout, stderr) => {
+      resolve(error ? { error: stderr || error.message } : { opened: true, path: target });
+    });
+  });
+}
+
+async function openExternalSafe(url) {
+  if (IS_KDE_WAYLAND && process.platform === "linux") return openWithXdg(url);
+  await shell.openExternal(url);
+  return { opened: true };
+}
+
+async function openPathSafe(target) {
+  if (IS_KDE_WAYLAND && process.platform === "linux") return openWithXdg(target);
+  const result = await shell.openPath(target);
+  return result ? { error: result } : { opened: true, path: target };
 }
 
 function apiRequest(method, apiPath, body) {
@@ -244,6 +309,16 @@ function createWindow({ show = true } = {}) {
     if (show) win.show();
     return win;
   }
+  const macWindowOptions = process.platform === "darwin" ? {
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 16, y: 16 },
+    vibrancy: "sidebar",
+    visualEffectState: "active",
+    backgroundColor: "#00000000",
+    transparent: true,
+  } : {
+    backgroundColor: "#f7f3ea",
+  };
   win = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -251,13 +326,8 @@ function createWindow({ show = true } = {}) {
     minHeight: 640,
     title: "Dachshund",
     show,
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 16 },
-    vibrancy: "sidebar",
-    visualEffectState: "active",
-    backgroundColor: "#00000000",
-    transparent: true,
     hasShadow: true,
+    ...macWindowOptions,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -342,7 +412,7 @@ function updateMenu() {
     { type: "separator" },
     { label: "Codex 代理", click: async () => { lastStatus = await runAction("enable-codex-proxy"); updateMenu(); } },
     { label: "Codex 直连", click: async () => { lastStatus = await runAction("disable-codex-proxy"); updateMenu(); } },
-    { label: "打开 Web UI", click: () => shell.openExternal(`http://127.0.0.1:${lastStatus?.config?.port || DEFAULT_PORT}/app`) },
+    { label: "打开 Web UI", click: () => openExternalSafe(`http://127.0.0.1:${lastStatus?.config?.port || DEFAULT_PORT}/app`) },
     { label: "打开日志", click: () => runAction("open-log") },
     { type: "separator" },
     { label: "退出", click: () => { app.isQuitting = true; app.quit(); } },
@@ -352,21 +422,45 @@ function updateMenu() {
 }
 
 async function createTray() {
-  tray = new Tray(iconImage());
+  if (shouldSkipTray()) {
+    console.warn("Dachshund tray disabled on KDE Wayland; set DACHSHUND_ENABLE_TRAY=1 to test tray support.");
+    return false;
+  }
+  try {
+    tray = new Tray(iconImage());
+  } catch (error) {
+    console.warn("Dachshund tray unavailable:", error.message);
+    tray = null;
+    return false;
+  }
   lastStatus = await runAction("status");
   lastQuota = await apiRequest("GET", "/api/quota");
   updateMenu();
-  setInterval(async () => {
+  trayStatusTimer = setInterval(async () => {
     lastStatus = await runAction("status");
     lastQuota = await apiRequest("GET", "/api/quota");
     updateMenu();
     win?.webContents.send("status:changed", lastStatus);
   }, 30000);
+  return true;
 }
 
 function appMenu() {
+  if (shouldUseNativeKdeMenu()) {
+    return;
+  }
+  const firstMenu = process.platform === "darwin"
+    ? { role: "appMenu" }
+    : {
+      label: "Dachshund",
+      submenu: [
+        { label: "Open Control Center", click: () => createWindow({ show: true }) },
+        { type: "separator" },
+        { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
+      ],
+    };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { role: "appMenu" },
+    firstMenu,
     {
       label: "View",
       submenu: [
@@ -387,16 +481,18 @@ ipcMain.handle("app:action", (_event, action, payload) => runAction(action, payl
 ipcMain.handle("app:api", (_event, method, apiPath, body) => apiRequest(method, apiPath, body));
 ipcMain.handle("app:open-external", (_event, url) => {
   if (!/^https?:\/\//.test(String(url))) return { error: "unsupported url" };
-  shell.openExternal(url);
-  return { opened: true };
+  return openExternalSafe(url);
 });
 ipcMain.handle("app:open-path", async (_event, key) => {
   if (!SAFE_PATH_KEYS.has(key)) return { error: "unsupported path" };
   const paths = await runAction("show-paths");
   const target = paths[key];
   if (!target) return { error: "path not available" };
-  const result = await shell.openPath(target);
-  return result ? { error: result } : { opened: true, path: target };
+  return openPathSafe(target);
+});
+ipcMain.handle("app:clipboard-write", (_event, text) => {
+  clipboard.writeText(String(text || ""));
+  return { copied: true };
 });
 ipcMain.handle("app:asset", (_event, name) => {
   if (name !== "dog-head") return "";
@@ -412,8 +508,26 @@ app.whenReady().then(async () => {
   fs.mkdirSync(userDataPath, { recursive: true });
   app.setPath("userData", userDataPath);
   appMenu();
-  await createTray();
-  if (!process.argv.includes("--menubar-only")) createWindow({ show: true });
+  const trayCreated = await createTray();
+  if (!process.argv.includes("--menubar-only") || (!trayCreated && shouldSkipTray())) createWindow({ show: true });
+  if (process.argv.includes("--show-window")) createWindow({ show: true });
+  if (process.argv.includes("--quit")) {
+    app.isQuitting = true;
+    app.quit();
+  }
+});
+
+app.on("second-instance", (_event, argv) => {
+  if (argv.includes("--quit")) {
+    app.isQuitting = true;
+    app.quit();
+    return;
+  }
+  if (argv.includes("--show-window") || !argv.includes("--menubar-only")) {
+    const window = createWindow({ show: true });
+    if (window.isMinimized()) window.restore();
+    window.focus();
+  }
 });
 
 app.on("window-all-closed", () => {});

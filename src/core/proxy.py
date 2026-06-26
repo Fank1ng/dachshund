@@ -28,7 +28,7 @@ from account_manager import (
 import codex_config
 from config import CONFIG_DIR, ConfigError, load, save, get
 from login_manager import LoginManager, find_codex_cli
-from codex_cli import format_login_command
+from codex_cli import format_login_command, remove_login_state
 from proxy_core import handle as proxy_handle
 from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
@@ -136,11 +136,16 @@ async def api_accounts_delete(request: web.Request) -> web.Response:
     if not target.exists():
         return web.json_response({"error": "not found"}, status=404)
     TRASH_DIR.mkdir(parents=True, exist_ok=True)
-    trashed_name = f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"
-    trashed = TRASH_DIR / trashed_name
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    trashed = TRASH_DIR / f"{name}-{stamp}"
+    suffix = 1
+    while trashed.exists():
+        trashed = TRASH_DIR / f"{name}-{stamp}-{suffix}"
+        suffix += 1
     shutil.move(str(target), str(trashed))
+    state_removed = remove_login_state(CONFIG_DIR, name)
     pool.scan()
-    return web.json_response({"deleted": name, "trashed_to": str(trashed)})
+    return web.json_response({"deleted": name, "trashed_to": str(trashed), "login_state_removed": state_removed})
 
 
 def _trash_entry(entry_name: str) -> Optional[dict]:
@@ -349,6 +354,10 @@ async def api_quota(request: web.Request) -> web.Response:
     Quota data is loaded from per-account quota.json files written by
     the quota_tracker module, or returned as empty if unavailable.
     """
+    return web.json_response(_quota_snapshot())
+
+
+def _quota_snapshot() -> dict:
     result = {}
     for acct in pool.accounts:
         quota_file = ACCOUNTS_DIR / acct.name / "quota.json"
@@ -364,7 +373,7 @@ async def api_quota(request: web.Request) -> web.Response:
                 }
         else:
             result[acct.name] = None
-    return web.json_response(result)
+    return result
 
 
 async def api_quota_refresh(request: web.Request) -> web.Response:
@@ -374,6 +383,7 @@ async def api_quota_refresh(request: web.Request) -> web.Response:
     return web.json_response({
         "refreshed": any(item.get("refreshed") for item in result.values()),
         "accounts": result,
+        "quota": _quota_snapshot(),
         "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
     })
 

@@ -10,8 +10,8 @@ ChatGPT Plus 账号池。
 
 - UI: Electron
 - Core: Python / aiohttp
-- Supported runtime today: macOS
-- Windows and Linux packaging directories are reserved for Electron packages.
+- Supported runtimes today: macOS, Fedora Linux RPM
+- Windows packaging directory is reserved for Electron packages.
 
 ## Layout
 
@@ -21,7 +21,7 @@ src/core/              Shared proxy, account, config, and runtime code
 platforms/mac/         macOS LaunchAgent helpers and app packaging
 platforms/windows/     Windows Electron packaging placeholder
 platforms/linux/deb/   Debian/Ubuntu package placeholder
-platforms/linux/rpm/   Fedora/RHEL/openSUSE package placeholder
+platforms/linux/rpm/   Fedora RPM package notes
 docs/                  User and platform docs
 tests/                 Python unit tests
 ```
@@ -52,6 +52,7 @@ chatgpt_base_url = "http://127.0.0.1:18800"
 npm run check
 npm test
 platforms/mac/build_dachshund_app.command
+npm run build:linux
 ```
 
 Build output stays under `dist/` and is ignored by Git.
@@ -62,6 +63,8 @@ Build output stays under `dist/` and is ignored by Git.
 - macOS LaunchAgent: `~/Library/LaunchAgents/com.fank1ng.dachshund.plist`
 - macOS app bundle: `dachshund.app`
 - Windows target runtime: `%LOCALAPPDATA%\dachshund`
+- Linux runtime: `${XDG_CONFIG_HOME:-~/.config}/dachshund`
+- Linux user service: `${XDG_CONFIG_HOME:-~/.config}/systemd/user/dachshund.service`
 
 ## Docs
 
