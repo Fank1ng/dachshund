@@ -2915,7 +2915,11 @@ class ProxyCoreRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             _target_url("https://chatgpt.com", "/wham/remote/control/server/enroll"),
-            "https://chatgpt.com/backend-api/wham/remote/control/server/enroll",
+            "https://chatgpt.com/wham/remote/control/server/enroll",
+        )
+        self.assertEqual(
+            _target_url("https://chatgpt.com", "/backend-api/wham/remote/control/server/enroll"),
+            "https://chatgpt.com/wham/remote/control/server/enroll",
         )
         self.assertEqual(
             _target_url(
@@ -2923,7 +2927,7 @@ class ProxyCoreRoutingTests(unittest.TestCase):
                 "/wham/remote/control/environments/env_x/clients",
                 "limit=100",
             ),
-            "https://chatgpt.com/backend-api/wham/remote/control/environments/env_x/clients?limit=100",
+            "https://chatgpt.com/wham/remote/control/environments/env_x/clients?limit=100",
         )
 
     def test_root_backend_aliases_map_to_chatgpt_upstream(self):
@@ -3234,19 +3238,19 @@ class ProxyCoreTests(unittest.TestCase):
         session = _FakeHTTPSession([
             _FakeHTTPUpstreamResponse([b'{"ok":true}'])
         ])
-        request = _FakeRequest(path="/wham/remote/control/server/enroll", method="POST")
+        request = _FakeRequest(path="/backend-api/wham/remote/control/server/enroll", method="POST")
 
         with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
                 mock.patch("account_manager.get", side_effect=_proxy_test_config):
             response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(session.calls[0][1], "https://chatgpt.com/backend-api/wham/remote/control/server/enroll")
+        self.assertEqual(session.calls[0][1], "https://chatgpt.com/wham/remote/control/server/enroll")
         self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
         self.assertEqual(session.calls[0][2]["headers"]["chatgpt-account-id"], "account-current")
         self.assertEqual(pool.recent_requests[0]["route_class"], "backend_fixed")
         self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
-        self.assertEqual(pool.recent_requests[0]["upstream_path"], "/backend-api/wham/remote/control/server/enroll")
+        self.assertEqual(pool.recent_requests[0]["upstream_path"], "/wham/remote/control/server/enroll")
 
     def test_model_responses_still_use_pool_selection(self):
         pool = AccountPool()

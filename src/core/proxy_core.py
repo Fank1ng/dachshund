@@ -200,6 +200,10 @@ def _codex_upstream_path(path: str) -> str:
         return CODEX_RESPONSES_PATH
     if path.startswith(f"{V1_RESPONSES_PATH}/"):
         return f"{CODEX_RESPONSES_PATH}{path[len(V1_RESPONSES_PATH):]}"
+    if path.startswith("/backend-api/wham/remote/control/"):
+        return path[len("/backend-api"):]
+    if path.startswith("/wham/remote/control/"):
+        return path
     if path.startswith(BACKEND_ALIAS_PREFIXES):
         return f"/backend-api{path}"
     return path

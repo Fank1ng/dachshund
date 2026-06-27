@@ -122,7 +122,6 @@ main {
   overflow-x: hidden;
   overflow-y: auto;
   background: var(--surface);
-  border-top-left-radius: 28px;
   box-shadow: var(--shadow-soft);
 }
 header {
@@ -381,7 +380,6 @@ label.check input {
   }
   main {
     padding: 22px;
-    border-top-left-radius: 0;
     box-shadow: none;
   }
   nav { grid-template-columns: repeat(5, 1fr); }
