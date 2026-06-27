@@ -29,6 +29,7 @@ COPY_FILES = {
     "VERSION",
     "account_manager.py",
     "build_manifest.json",
+    "codex_cli.py",
     "control_actions.py",
     "codex_config.py",
     "config.py",
@@ -351,7 +352,7 @@ def _build_runtime_staging(source: Path, staging: Path) -> None:
 
 
 def _validate_runtime_staging(staging: Path) -> None:
-    required = ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py", "VERSION")
+    required = ("account_manager.py", "codex_cli.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py", "VERSION")
     missing = [name for name in required if not (staging / name).is_file()]
     if missing:
         raise RuntimeSyncError(f"runtime staging missing required files: {', '.join(missing)}")

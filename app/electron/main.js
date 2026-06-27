@@ -145,6 +145,7 @@ function runtimeDir() {
 
 function helperPath() {
   if (app.isPackaged) return path.join(process.resourcesPath, "runtime", "control_actions.py");
+  if (process.platform === "darwin") return path.join(MAC_DIR, "control_actions.py");
   return path.join(PROJECT_ROOT, "app", "platform", "control_actions.py");
 }
 

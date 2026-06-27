@@ -33,18 +33,6 @@ for entry in (str(CORE_DIR), str(PLATFORM_DIR), str(ROOT)):
         sys.path.insert(0, entry)
 
 
-if sys.platform == "darwin":
-    mac_actions = ROOT / "platforms" / "mac" / "control_actions.py"
-    if mac_actions.exists():
-        spec = importlib.util.spec_from_file_location("dachshund_mac_control_actions", mac_actions)
-        module = importlib.util.module_from_spec(spec)
-        assert spec and spec.loader
-        spec.loader.exec_module(module)
-        if __name__ == "__main__":
-            module.main()
-            raise SystemExit
-
-
 from account_manager import Account, AccountPool, account_dir, validate_account_name
 import account_manager
 import codex_config
@@ -472,7 +460,7 @@ def start_login(name: str) -> dict:
         pid=process.pid,
     )
     login_details = wait_for_login_details(log_path, log_offset=log_offset)
-    if not login_details.get("login_url") or not login_details.get("device_code"):
+    if not login_details.get("login_url"):
         startup_error = login_startup_error_result(log_path, account=safe_name, log_offset=log_offset)
         if startup_error:
             return {

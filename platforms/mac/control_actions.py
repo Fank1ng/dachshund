@@ -849,7 +849,7 @@ def start_login(name: str) -> dict:
     except Exception:
         pass
     login_details = wait_for_login_details(log_path, log_offset=log_offset)
-    if not login_details.get("login_url") or not login_details.get("device_code"):
+    if not login_details.get("login_url"):
         startup_error = login_startup_error_result(log_path, account=safe_name, log_offset=log_offset)
         if startup_error:
             return {

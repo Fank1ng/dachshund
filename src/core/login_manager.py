@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from account_manager import account_dir, validate_account_name
-from codex_cli import CODEX_CLI_MISSING_MESSAGE, find_codex_cli
+from codex_cli import CODEX_CLI_MISSING_MESSAGE, find_codex_cli, login_device_auth_args
 
 
 class LoginTask:
@@ -54,7 +54,7 @@ class LoginTask:
         env = {**os.environ, "CODEX_HOME": str(self.target_dir)}
         self.process = await asyncio.create_subprocess_exec(
             self.codex_cli,
-            "login",
+            *login_device_auth_args(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,

@@ -157,7 +157,16 @@ class Account:
                             logger.error(
                                 f"Account {self.name}: refresh failed ({resp.status}): {text}"
                             )
-                            if "refresh_token_reused" in text or "invalid_grant" in text:
+                            lowered = text.lower()
+                            if any(
+                                marker in lowered
+                                for marker in (
+                                    "refresh_token_invalidated",
+                                    "refresh_token_reused",
+                                    "invalid_grant",
+                                    "your session has ended",
+                                )
+                            ):
                                 self.enabled = False
                                 self.auth_error = "refresh_token_invalid"
                                 self.save_meta()

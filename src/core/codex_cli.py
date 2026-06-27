@@ -82,8 +82,8 @@ def format_login_command(codex_cli: str, target_dir: Path, *, platform_name: Opt
 
 
 def login_device_auth_args() -> list[str]:
-    """Return Codex CLI args for browser-based device auth login."""
-    return ["login", "--device-auth"]
+    """Return Codex CLI args for browser-based login."""
+    return ["login"]
 
 
 def extract_login_url(text: str) -> str:
@@ -320,17 +320,18 @@ def complete_login_import(state: Mapping[str, object]) -> dict:
             error=log_error,
         )
 
+    if _login_state_expired(started_at):
+        return _login_result(
+            account,
+            "expired",
+            auth_path,
+            source_auth_path,
+            log_path,
+            error="expired",
+        )
+
     process_running = _login_process_running(pid)
     if process_running is False:
-        if _login_state_expired(started_at):
-            return _login_result(
-                account,
-                "expired",
-                auth_path,
-                source_auth_path,
-                log_path,
-                error="expired",
-            )
         return _login_result(
             account,
             "error",

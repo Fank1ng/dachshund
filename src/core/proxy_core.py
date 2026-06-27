@@ -68,6 +68,11 @@ class _WebSocketRelayResult:
 UPSTREAM_MAP = {
     "/v1/": "https://api.openai.com",
     "/backend-api/": "https://chatgpt.com",
+    "/wham/": "https://chatgpt.com",
+    "/codex/": "https://chatgpt.com",
+    "/ps/": "https://chatgpt.com",
+    "/connectors/": "https://chatgpt.com",
+    "/plugins/": "https://chatgpt.com",
 }
 V1_RESPONSES_PATH = "/v1/responses"
 CODEX_RESPONSES_PATH = "/backend-api/codex/responses"
@@ -91,6 +96,7 @@ REMOTE_BACKEND_PREFIXES = (
     "/backend-api/relay",
     "/backend-api/connections",
 )
+BACKEND_ALIAS_PREFIXES = ("/wham/", "/codex/", "/ps/", "/connectors/", "/plugins/")
 
 
 class _CodexCompletionTracker:
@@ -194,6 +200,8 @@ def _codex_upstream_path(path: str) -> str:
         return CODEX_RESPONSES_PATH
     if path.startswith(f"{V1_RESPONSES_PATH}/"):
         return f"{CODEX_RESPONSES_PATH}{path[len(V1_RESPONSES_PATH):]}"
+    if path.startswith(BACKEND_ALIAS_PREFIXES):
+        return f"/backend-api{path}"
     return path
 
 
@@ -209,7 +217,7 @@ def _websocket_target_url(path: str, query_string: str = "") -> str:
 
 
 def _uses_chatgpt_backend(path: str) -> bool:
-    return path.startswith("/backend-api/") or _is_v1_codex_responses_path(path)
+    return path.startswith(("/backend-api/", *BACKEND_ALIAS_PREFIXES)) or _is_v1_codex_responses_path(path)
 
 
 def _route_class(path: str) -> str:
@@ -217,7 +225,7 @@ def _route_class(path: str) -> str:
         return ROUTE_MODEL_POOL
     if path.startswith(REMOTE_BACKEND_PREFIXES):
         return ROUTE_REMOTE_FIXED
-    if path.startswith("/backend-api/"):
+    if path.startswith(("/backend-api/", *BACKEND_ALIAS_PREFIXES)):
         return ROUTE_BACKEND_FIXED
     return ROUTE_MODEL_POOL
 

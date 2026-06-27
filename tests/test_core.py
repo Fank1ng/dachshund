@@ -2,6 +2,7 @@ import json
 import importlib.util
 import os
 import plistlib
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -238,6 +239,24 @@ class CodexCliLocatorTests(unittest.TestCase):
                     asyncio.run(login_manager.LoginManager().start("new_account"))
             self.assertIn("Codex CLI not found", str(exc.exception))
             self.assertIn("CODEX_CLI_PATH", str(exc.exception))
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_login_manager_starts_browser_login(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        fake_process = mock.Mock(returncode=None, stdout=None)
+        create = mock.AsyncMock(return_value=fake_process)
+        try:
+            with mock.patch("login_manager.find_codex_cli", return_value="/tmp/codex"), \
+                    mock.patch("login_manager.asyncio.create_subprocess_exec", create):
+                result = asyncio.run(login_manager.LoginManager().start("new_account"))
+
+            args, kwargs = create.call_args
+            self.assertEqual(args, ("/tmp/codex", "login"))
+            self.assertEqual(Path(kwargs["env"]["CODEX_HOME"]).resolve(), (root / "new_account").resolve())
+            self.assertEqual(result["state"], "running")
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
@@ -499,6 +518,24 @@ class CodexCliLocatorTests(unittest.TestCase):
         self.assertEqual(result["state"], "expired")
         self.assertEqual(result["error"], "expired")
 
+    def test_login_status_expires_stale_state_even_if_pid_is_alive(self):
+        root = Path(tempfile.mkdtemp())
+        log_path = root / "login.log"
+        log_path.write_text("Open https://auth.openai.com/codex/device\n")
+
+        with mock.patch("codex_cli._login_process_running", return_value=True):
+            result = codex_cli.complete_login_import({
+                "account": "new",
+                "account_dir": str(root / "accounts" / "new"),
+                "source_auth_path": str(root / "codex" / "auth.json"),
+                "log_path": str(log_path),
+                "started_at": time.time() - 1200,
+                "pid": 123,
+            })
+
+        self.assertEqual(result["state"], "expired")
+        self.assertEqual(result["error"], "expired")
+
     def test_login_status_detects_device_auth_failures_and_429(self):
         root = Path(tempfile.mkdtemp())
         log_path = root / "login.log"
@@ -720,6 +757,41 @@ class AccountTests(unittest.TestCase):
         self.assertFalse(loaded.enabled)
         self.assertEqual(loaded.auth_error, "refresh_token_invalid")
 
+    def test_refresh_token_invalidated_disables_account(self):
+        class Response:
+            status = 401
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return '{"error":{"code":"refresh_token_invalidated","message":"Your session has ended."}}'
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def post(self, *args, **kwargs):
+                return Response()
+
+        root = Path(tempfile.mkdtemp())
+        account = Account("tmp", root / "auth.json")
+        account.refresh_token = "refresh"
+
+        with mock.patch("account_manager.aiohttp.ClientSession", return_value=Session()):
+            ok = asyncio.run(account.refresh())
+
+        self.assertFalse(ok)
+        self.assertFalse(account.enabled)
+        self.assertEqual(account.auth_error, "refresh_token_invalid")
+        self.assertFalse(json.loads((root / "account.json").read_text())["enabled"])
+
     def test_record_request_keeps_request_id(self):
         pool = AccountPool()
         account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
@@ -798,6 +870,21 @@ class AccountTests(unittest.TestCase):
 
         self.assertEqual(account.name, "current")
         self.assertEqual(reason, "current")
+
+    def test_fixed_account_skips_disabled_fallback(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        bad = Account("b", root / "b" / "auth.json")
+        bad.access_token = "token-b"
+        bad.enabled = False
+        good = Account("c", root / "c" / "auth.json")
+        good.access_token = "token-c"
+        pool.accounts = [bad, good]
+
+        account, reason = pool.fixed_account_selection("current")
+
+        self.assertEqual(account.name, "c")
+        self.assertEqual(reason, "fallback_first_available")
 
     def test_fixed_account_reports_missing_specified_account(self):
         pool = AccountPool()
@@ -1453,6 +1540,17 @@ class ControlActionsTests(unittest.TestCase):
         self.assertIn('登录链接：${result.login_url}', text)
         self.assertIn('验证码：${result.device_code}', text)
 
+    def test_dev_mac_electron_uses_mac_control_actions_directly(self):
+        text = (ROOT / "app" / "electron" / "main.js").read_text()
+
+        self.assertIn('if (process.platform === "darwin") return path.join(MAC_DIR, "control_actions.py");', text)
+
+    def test_cross_platform_control_actions_does_not_delegate_to_mac(self):
+        text = (ROOT / "app" / "platform" / "control_actions.py").read_text()
+
+        self.assertNotIn("dachshund_mac_control_actions", text)
+        self.assertNotIn('"mac" / "control_actions.py"', text)
+
     def test_clear_auth_error_local_reenables_account(self):
         old_accounts_dir = account_manager.ACCOUNTS_DIR
         root = Path(tempfile.mkdtemp())
@@ -1522,13 +1620,15 @@ class ControlActionsTests(unittest.TestCase):
     def test_delete_account_local_moves_account_to_trash(self):
         old_accounts_dir = account_manager.ACCOUNTS_DIR
         root = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
         account_manager.ACCOUNTS_DIR = root
         try:
             account_dir = root / "a"
             account_dir.mkdir(parents=True)
             (account_dir / "auth.json").write_text(json.dumps({"tokens": {"access_token": "x"}}))
 
-            with mock.patch("control_actions.proxy_status", return_value=None):
+            with mock.patch("control_actions.proxy_status", return_value=None), \
+                    mock.patch.object(control_actions.service_manager, "RUNTIME_DIR", runtime):
                 result = control_actions.delete_account("a")
 
             self.assertFalse(result["running"])
@@ -1637,10 +1737,37 @@ class ControlActionsTests(unittest.TestCase):
             self.assertEqual(state["log_offset"], 0)
             self.assertTrue((root / "new_account").exists())
             args, kwargs = popen.call_args_list[0]
-            self.assertEqual(args[0], ["/tmp/codex", "login", "--device-auth"])
+            self.assertEqual(args[0], ["/tmp/codex", "login"])
+            command_parts = shlex.split(result["command"])
+            self.assertEqual(command_parts[1:], ["/tmp/codex", "login"])
+            self.assertEqual(Path(command_parts[0].split("=", 1)[1]).resolve(), (root / "new_account").resolve())
             self.assertEqual(Path(kwargs["env"]["CODEX_HOME"]).resolve(), (root / "new_account").resolve())
             self.assertEqual(kwargs["cwd"], str(runtime))
             wait_for_details.assert_called_once_with(runtime / "login.log", log_offset=0)
+        finally:
+            account_manager.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_start_login_accepts_browser_login_without_device_code(self):
+        old_accounts_dir = account_manager.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        account_manager.ACCOUNTS_DIR = root
+        fake_process = mock.Mock(pid=1234)
+        try:
+            with mock.patch("control_actions.find_codex_cli", return_value="/tmp/codex"), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch("control_actions.wait_for_login_details", return_value={
+                        "login_url": "https://auth.openai.com/login",
+                        "device_code": "",
+                    }), \
+                    mock.patch("control_actions.subprocess.Popen", return_value=fake_process):
+                result = control_actions.start_login("new_account")
+
+            self.assertEqual(result["action"], "login_started")
+            self.assertEqual(result["login_url"], "https://auth.openai.com/login")
+            self.assertEqual(result["device_code"], "")
+            self.assertTrue(result["started"])
+            self.assertNotIn("error", result)
         finally:
             account_manager.ACCOUNTS_DIR = old_accounts_dir
 
@@ -2182,7 +2309,7 @@ class ControlActionsTests(unittest.TestCase):
 
 class ServiceManagerRuntimeTests(unittest.TestCase):
     def _write_minimal_runtime_source(self, source: Path) -> None:
-        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
+        for name in ("account_manager.py", "codex_cli.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
             (source / name).write_text(f"# {name}\n")
         (source / "VERSION").write_text("0.6.1\n")
         (source / "static").mkdir(exist_ok=True)
@@ -2200,7 +2327,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             (source / "static").mkdir()
             (source / "proxy.py").write_text("# new proxy\n")
             (source / "config.json").write_text('{"port": 8801}\n')
-            for name in ("account_manager.py", "config.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
+            for name in ("account_manager.py", "codex_cli.py", "config.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
                 (source / name).write_text(f"# new {name}\n")
             (source / "VERSION").write_text("0.6.1\n")
             (source / "python" / "bin" / "python3").write_text("new-python\n")
@@ -2226,6 +2353,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             self.assertEqual((runtime / "static" / "index.html").read_text(), "new-static\n")
             self.assertEqual((runtime / "config.json").read_text(), '{"port": 18800}\n')
             self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
+            self.assertEqual((runtime / "codex_cli.py").read_text(), "# new codex_cli.py\n")
 
     def test_sync_runtime_staging_failure_preserves_existing_runtime(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
@@ -2248,7 +2376,7 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
             source = Path(source_tmp)
             runtime = Path(runtime_tmp)
-            for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
+            for name in ("account_manager.py", "codex_cli.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
                 (source / name).write_text(f"# new {name}\n")
                 (runtime / name).write_text(f"# old {name}\n")
             (source / "VERSION").write_text("0.6.1\n")
@@ -2290,6 +2418,7 @@ class RuntimeManifestTests(unittest.TestCase):
         (root / "VERSION").write_text(version + "\n")
         for name in (
             "account_manager.py",
+            "codex_cli.py",
             "config.py",
             "proxy.py",
             "proxy_core.py",
@@ -2777,6 +2906,39 @@ class ProxyCoreRoutingTests(unittest.TestCase):
     def test_route_class_fixes_remote_and_unknown_backend_paths(self):
         self.assertEqual(_route_class("/backend-api/codex/sessions"), "remote_fixed")
         self.assertEqual(_route_class("/backend-api/wham/apps"), "backend_fixed")
+        self.assertEqual(_route_class("/wham/remote/control/server/enroll"), "backend_fixed")
+
+    def test_wham_remote_control_maps_to_chatgpt_upstream(self):
+        self.assertEqual(
+            proxy_core._get_upstream("/wham/remote/control/server/enroll"),
+            "https://chatgpt.com",
+        )
+        self.assertEqual(
+            _target_url("https://chatgpt.com", "/wham/remote/control/server/enroll"),
+            "https://chatgpt.com/backend-api/wham/remote/control/server/enroll",
+        )
+        self.assertEqual(
+            _target_url(
+                "https://chatgpt.com",
+                "/wham/remote/control/environments/env_x/clients",
+                "limit=100",
+            ),
+            "https://chatgpt.com/backend-api/wham/remote/control/environments/env_x/clients?limit=100",
+        )
+
+    def test_root_backend_aliases_map_to_chatgpt_upstream(self):
+        cases = {
+            "/codex/analytics-events/events": "/backend-api/codex/analytics-events/events",
+            "/ps/plugins/suggested": "/backend-api/ps/plugins/suggested",
+            "/connectors/directory/list": "/backend-api/connectors/directory/list",
+            "/plugins/installed": "/backend-api/plugins/installed",
+        }
+
+        for path, upstream_path in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(proxy_core._get_upstream(path), "https://chatgpt.com")
+                self.assertEqual(_target_url("https://chatgpt.com", path), f"https://chatgpt.com{upstream_path}")
+                self.assertEqual(_route_class(path), "backend_fixed")
 
     def test_non_codex_json_response_does_not_force_streaming(self):
         response = mock.Mock()
@@ -3006,6 +3168,18 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(headers["Sec-Fetch-Site"], "same-origin")
         self.assertEqual(headers["chatgpt-account-id"], "selected-account")
 
+    def test_wham_headers_are_chatgpt_web_compatible(self):
+        account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "selected-token"
+        account.account_id = "selected-account"
+
+        headers = _account_headers({"User-Agent": "codex-cli"}, account, "/wham/remote/control/server/enroll")
+
+        self.assertIn("Mozilla/5.0", headers["User-Agent"])
+        self.assertEqual(headers["Origin"], "https://chatgpt.com")
+        self.assertEqual(headers["Referer"], "https://chatgpt.com/")
+        self.assertEqual(headers["chatgpt-account-id"], "selected-account")
+
     def test_v1_responses_headers_are_chatgpt_web_compatible(self):
         account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
         account.access_token = "selected-token"
@@ -3047,6 +3221,32 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
         self.assertEqual(pool.recent_requests[0]["route_class"], "backend_fixed")
         self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
+
+    def test_wham_remote_control_uses_fixed_current_account(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        current = Account("current", root / "current" / "auth.json")
+        current.access_token = "token-current"
+        current.account_id = "account-current"
+        other = Account("other", root / "other" / "auth.json")
+        other.access_token = "token-other"
+        pool.accounts = [current, other]
+        session = _FakeHTTPSession([
+            _FakeHTTPUpstreamResponse([b'{"ok":true}'])
+        ])
+        request = _FakeRequest(path="/wham/remote/control/server/enroll", method="POST")
+
+        with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
+                mock.patch("account_manager.get", side_effect=_proxy_test_config):
+            response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(session.calls[0][1], "https://chatgpt.com/backend-api/wham/remote/control/server/enroll")
+        self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
+        self.assertEqual(session.calls[0][2]["headers"]["chatgpt-account-id"], "account-current")
+        self.assertEqual(pool.recent_requests[0]["route_class"], "backend_fixed")
+        self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
+        self.assertEqual(pool.recent_requests[0]["upstream_path"], "/backend-api/wham/remote/control/server/enroll")
 
     def test_model_responses_still_use_pool_selection(self):
         pool = AccountPool()
@@ -3972,7 +4172,7 @@ class CodexConfigTests(unittest.TestCase):
         self.assertTrue(codex_config.status(config_path)["enabled"])
         text = config_path.read_text()
         self.assertIn('model_provider = "codex-account-pool"', text)
-        self.assertIn('chatgpt_base_url = "http://127.0.0.1:18800"', text)
+        self.assertIn('chatgpt_base_url = "http://127.0.0.1:18800/backend-api/"', text)
         self.assertIn('[model_providers.codex-account-pool]', text)
         self.assertIn('base_url = "http://127.0.0.1:18800/v1"', text)
         self.assertIn('wire_api = "responses"', text)
@@ -3987,7 +4187,7 @@ class CodexConfigTests(unittest.TestCase):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"
         config_path.write_text(
             'model_provider = "codex-account-pool"\n'
-            'chatgpt_base_url = "http://127.0.0.1:18800"\n'
+            'chatgpt_base_url = "http://127.0.0.1:18800/backend-api/"\n'
             "[model_providers.codex-account-pool]\n"
             'base_url = "http://127.0.0.1:18800/backend-api/codex"\n'
             'wire_api = "responses"\n'
@@ -4005,7 +4205,7 @@ class CodexConfigTests(unittest.TestCase):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"
         config_path.write_text(
             'model_provider = "codex-account-pool"\n'
-            'chatgpt_base_url = "http://127.0.0.1:18800"\n'
+            'chatgpt_base_url = "http://127.0.0.1:18800/backend-api/"\n'
             "[model_providers.codex-account-pool]\n"
             'base_url = "http://127.0.0.1:18800/v1"\n'
             'wire_api = "responses"\n'
@@ -4034,7 +4234,7 @@ class CodexConfigTests(unittest.TestCase):
 
 class ServiceManagerTests(unittest.TestCase):
     def _write_minimal_runtime_source(self, source: Path) -> None:
-        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
+        for name in ("account_manager.py", "codex_cli.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
             (source / name).write_text(f"# {name}\n")
         (source / "VERSION").write_text("0.6.1\n")
         (source / "static").mkdir(exist_ok=True)

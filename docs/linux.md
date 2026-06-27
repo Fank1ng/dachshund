@@ -109,7 +109,7 @@ mode from the app. Enabling writes local provider settings for:
 
 ```toml
 openai_base_url = "http://127.0.0.1:18800/v1"
-chatgpt_base_url = "http://127.0.0.1:18800"
+chatgpt_base_url = "http://127.0.0.1:18800/backend-api/"
 ```
 
 Disabling comments Dachshund-managed settings back out and leaves a timestamped

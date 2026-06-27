@@ -43,7 +43,7 @@ When enabled, Dachshund writes Codex settings to `~/.codex/config.toml`:
 
 ```toml
 openai_base_url = "http://127.0.0.1:18800/v1"
-chatgpt_base_url = "http://127.0.0.1:18800"
+chatgpt_base_url = "http://127.0.0.1:18800/backend-api/"
 ```
 
 ## Build And Check
