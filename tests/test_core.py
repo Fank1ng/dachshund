@@ -709,6 +709,110 @@ class CrossPlatformServiceTests(unittest.TestCase):
 
         entry = module._desktop_entry("/opt/Dachshund/dachshund")
         self.assertIn("Exec=/opt/Dachshund/dachshund --tray", entry)
+        self.assertIn("Terminal=false", entry)
+        self.assertIn("X-KDE-autostart-after=panel", entry)
+
+    def test_linux_menubar_login_status_reports_stale_autostart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp) / "dachshund"
+            env = {
+                "XDG_CONFIG_HOME": tmp,
+                "CODEX_PROXY_CONFIG_DIR": str(runtime_dir),
+                "CODEX_PROXY_APP_EXECUTABLE": "/opt/Dachshund/dachshund",
+            }
+            with mock.patch.dict(os.environ, env):
+                module = load_module_from(ROOT / "platforms" / "linux" / "service_manager.py", "linux_service_manager_autostart_status_test")
+                module.AUTOSTART_PATH.parent.mkdir(parents=True)
+                module.AUTOSTART_PATH.write_text(module._desktop_entry("/old/dachshund"), encoding="utf-8")
+
+                status = module.menubar_login_status()
+
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["expected_exec"], "/opt/Dachshund/dachshund --tray")
+        self.assertEqual(status["installed_exec"], "/old/dachshund --tray")
+        self.assertTrue(status["needs_repair"])
+
+    def test_linux_native_menu_quota_labels_match_electron_summary(self):
+        module = self._load_linux_native_menu_module()
+        quota = {
+            "plus": {
+                "plan_type": "plus",
+                "rate_limit": {
+                    "primary_window": {"used_percent": 24.5, "limit_window_seconds": 18000},
+                    "secondary_window": {"used_percent": 40, "limit_window_seconds": 604800},
+                },
+            },
+            "free": {
+                "plan_type": "free",
+                "rate_limit": {
+                    "primary_window": {"used_percent": 80, "limit_window_seconds": 18000},
+                    "secondary_window": {"used_percent": 80, "limit_window_seconds": 18000},
+                },
+            },
+        }
+
+        self.assertEqual(module.quota_menu_labels(quota), ("5h 96/200%", "7d 80/200%"))
+
+    def test_linux_native_menu_quota_labels_fallback_when_unavailable(self):
+        module = self._load_linux_native_menu_module()
+
+        self.assertEqual(module.quota_menu_labels({"a": {"error": "quota_unavailable"}}), ("5h -", "7d -"))
+        self.assertEqual(module.status_label({"running": True, "enabled": False}), "Dachshund 在线 · 直连")
+
+    def test_linux_native_menu_status_rows_are_enabled_but_inert(self):
+        module = self._load_linux_native_menu_module()
+
+        for item_id, label in ((9, "Dachshund 在线 · 代理"), (10, "5h 100/100%"), (11, "7d 100/100%")):
+            props = module.item_properties(item_id, label)
+            self.assertTrue(props["enabled"].unpack())
+            self.assertTrue(props["visible"].unpack())
+
+        loop = mock.Mock()
+        with mock.patch.object(module, "current_menu_labels", return_value=("Dachshund 在线 · 代理", "5h 100/100%", "7d 100/100%")), \
+                mock.patch.object(module, "open_control_center") as open_control_center, \
+                mock.patch.object(module, "run_action") as run_action, \
+                mock.patch.object(module, "open_url") as open_url, \
+                mock.patch.object(module, "quit_apps") as quit_apps:
+            module.activate(module.action_for_id(9, loop), loop)
+
+        open_control_center.assert_not_called()
+        run_action.assert_not_called()
+        open_url.assert_not_called()
+        quit_apps.assert_not_called()
+
+    def test_linux_rpm_wrapper_quit_bypasses_native_menu_start(self):
+        text = (ROOT / "platforms" / "linux" / "build_rpm.sh").read_text(encoding="utf-8")
+        wrapper = text.split("<<'WRAPPER'\n", 1)[1].split("\nWRAPPER", 1)[0]
+        quit_branch = wrapper.split("--quit)", 1)[1].split(";;", 1)[0]
+
+        self.assertLess(wrapper.index("--quit)"), wrapper.index('if [[ "${DACHSHUND_NATIVE_WAYLAND:-}" != "1" ]]'))
+        self.assertIn('exec "$REAL_DACHSHUND" "$@"', quit_branch)
+        self.assertNotIn("start_native_menu", quit_branch)
+
+    def _load_linux_native_menu_module(self):
+        class Variant:
+            def __init__(self, _signature, value):
+                self.value = value
+
+            def unpack(self):
+                return self.value
+
+            @staticmethod
+            def new_tuple(*values):
+                return values
+
+        gi = type(sys)("gi")
+        gi.require_version = lambda *_args, **_kwargs: None
+        repository = type(sys)("gi.repository")
+        gio = type(sys)("Gio")
+        glib = type(sys)("GLib")
+        gio.DBusConnection = object
+        glib.MainLoop = object
+        glib.Variant = Variant
+        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository, "gi.repository.Gio": gio, "gi.repository.GLib": glib}):
+            repository.Gio = gio
+            repository.GLib = glib
+            return load_module_from(ROOT / "platforms" / "linux" / "native_menu.py", "linux_native_menu_test")
 
     def test_linux_install_syncs_runtime_without_touching_system_service(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2915,11 +3019,7 @@ class ProxyCoreRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             _target_url("https://chatgpt.com", "/wham/remote/control/server/enroll"),
-            "https://chatgpt.com/wham/remote/control/server/enroll",
-        )
-        self.assertEqual(
-            _target_url("https://chatgpt.com", "/backend-api/wham/remote/control/server/enroll"),
-            "https://chatgpt.com/wham/remote/control/server/enroll",
+            "https://chatgpt.com/backend-api/wham/remote/control/server/enroll",
         )
         self.assertEqual(
             _target_url(
@@ -2927,7 +3027,7 @@ class ProxyCoreRoutingTests(unittest.TestCase):
                 "/wham/remote/control/environments/env_x/clients",
                 "limit=100",
             ),
-            "https://chatgpt.com/wham/remote/control/environments/env_x/clients?limit=100",
+            "https://chatgpt.com/backend-api/wham/remote/control/environments/env_x/clients?limit=100",
         )
 
     def test_root_backend_aliases_map_to_chatgpt_upstream(self):
@@ -3238,19 +3338,19 @@ class ProxyCoreTests(unittest.TestCase):
         session = _FakeHTTPSession([
             _FakeHTTPUpstreamResponse([b'{"ok":true}'])
         ])
-        request = _FakeRequest(path="/backend-api/wham/remote/control/server/enroll", method="POST")
+        request = _FakeRequest(path="/wham/remote/control/server/enroll", method="POST")
 
         with mock.patch("proxy_core.get", side_effect=_proxy_test_config), \
                 mock.patch("account_manager.get", side_effect=_proxy_test_config):
             response = asyncio.run(proxy_core._handle_with_session(request, pool, session))
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(session.calls[0][1], "https://chatgpt.com/wham/remote/control/server/enroll")
+        self.assertEqual(session.calls[0][1], "https://chatgpt.com/backend-api/wham/remote/control/server/enroll")
         self.assertEqual(session.calls[0][2]["headers"]["Authorization"], "Bearer token-current")
         self.assertEqual(session.calls[0][2]["headers"]["chatgpt-account-id"], "account-current")
         self.assertEqual(pool.recent_requests[0]["route_class"], "backend_fixed")
         self.assertEqual(pool.recent_requests[0]["fixed_account"], "current")
-        self.assertEqual(pool.recent_requests[0]["upstream_path"], "/wham/remote/control/server/enroll")
+        self.assertEqual(pool.recent_requests[0]["upstream_path"], "/backend-api/wham/remote/control/server/enroll")
 
     def test_model_responses_still_use_pool_selection(self):
         pool = AccountPool()
