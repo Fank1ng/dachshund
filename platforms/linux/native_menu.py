@@ -9,6 +9,7 @@ import fcntl
 from pathlib import Path
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -34,6 +35,10 @@ MENU_PATH = "/MenuBar"
 DEFAULT_PORT = 18800
 LOCK_FILE = RUNTIME_DIR / "native-menu.lock"
 LOCK_HANDLE = None
+MENU_CACHE_SECONDS = 30
+MENU_REVISION = 1
+MENU_LABELS: tuple[str, ...] = ()
+MENU_REFRESHED_AT = 0.0
 
 
 SNI_XML = """
@@ -99,6 +104,10 @@ DBUSMENU_XML = """
       <arg name="updatesNeeded" type="ai" direction="out"/>
       <arg name="idErrors" type="ai" direction="out"/>
     </method>
+    <signal name="LayoutUpdated">
+      <arg name="revision" type="u"/>
+      <arg name="parent" type="i"/>
+    </signal>
   </interface>
 </node>
 """
@@ -141,6 +150,122 @@ def current_port() -> int:
         return DEFAULT_PORT
 
 
+def api_get(path: str, port: int | None = None) -> dict:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port or current_port()}{path}", timeout=5) as response:
+            return json.loads(response.read().decode("utf-8") or "{}")
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return {"error": str(exc)}
+
+
+def number_or_none(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def quota_window(window_data, fallback_used) -> dict[str, float | None]:
+    data = window_data or {}
+    used = number_or_none(data.get("used_percent"))
+    if used is None:
+        used = number_or_none(fallback_used)
+    if used is None:
+        return {"value": None, "used": None}
+    return {"value": max(0, min(100, 100 - used)), "used": used}
+
+
+def has_distinct_weekly_window(primary, secondary) -> bool:
+    secondary_seconds = number_or_none((secondary or {}).get("limit_window_seconds"))
+    if secondary_seconds is None or secondary_seconds < 604800 * 0.9:
+        return False
+    primary_seconds = number_or_none((primary or {}).get("limit_window_seconds"))
+    return primary_seconds is None or abs(secondary_seconds - primary_seconds) >= 60
+
+
+def uses_shared_codex_window(data: dict, primary, secondary) -> bool:
+    plan = str(data.get("plan_type") or "").lower()
+    return plan in {"free", "go"} and not has_distinct_weekly_window(primary, secondary)
+
+
+def quota_summary(data: dict) -> dict[str, dict[str, float | None]]:
+    rate_limit = data.get("rate_limit") or {}
+    primary = rate_limit.get("primary_window") or None
+    secondary = rate_limit.get("secondary_window") or None
+    five_hour = quota_window(primary, data.get("5h_usage"))
+    seven_day = quota_window(secondary, data.get("weekly_usage"))
+    if uses_shared_codex_window(data, primary, secondary):
+        seven_day = quota_window(primary, data.get("5h_usage"))
+    return {"five_hour": five_hour, "seven_day": seven_day}
+
+
+def quota_menu_labels(quota: dict | None) -> tuple[str, str]:
+    rows = []
+    for data in (quota or {}).values():
+        if not isinstance(data, dict):
+            continue
+        summary = quota_summary(data)
+        if summary["five_hour"]["value"] is not None and summary["seven_day"]["value"] is not None:
+            rows.append(summary)
+    if not rows:
+        return ("5h -", "7d -")
+    five_hour = js_round(sum(row["five_hour"]["value"] or 0 for row in rows))
+    seven_day = js_round(sum(row["seven_day"]["value"] or 0 for row in rows))
+    total = len(rows) * 100
+    return (f"5h {five_hour}/{total}%", f"7d {seven_day}/{total}%")
+
+
+def js_round(value: float) -> int:
+    return int(value + 0.5)
+
+
+def status_label(status: dict | None) -> str:
+    status = status or {}
+    running = "在线" if status.get("running") else "离线"
+    proxy = "代理" if status.get("enabled") else "直连"
+    return f"Dachshund {running} · {proxy}"
+
+
+def current_menu_labels() -> tuple[str, ...]:
+    global MENU_LABELS, MENU_REFRESHED_AT
+    now = time.monotonic()
+    if MENU_LABELS and now - MENU_REFRESHED_AT < MENU_CACHE_SECONDS:
+        return MENU_LABELS
+    return refresh_menu_labels()
+
+
+def refresh_menu_labels() -> tuple[str, ...]:
+    global MENU_LABELS, MENU_REFRESHED_AT
+    status = run_action("status")
+    port = DEFAULT_PORT
+    try:
+        port = int((status.get("config") or {}).get("port") or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        pass
+    quota = api_get("/api/quota", port=port) if status and not status.get("error") else {}
+    quota_labels = quota_menu_labels(quota)
+    MENU_LABELS = (status_label(status), *quota_labels)
+    MENU_REFRESHED_AT = time.monotonic()
+    return MENU_LABELS
+
+
+def refresh_menu(connection: Gio.DBusConnection | None = None, *, force: bool = False) -> bool:
+    global MENU_REVISION, MENU_REFRESHED_AT
+    previous = MENU_LABELS
+    if force:
+        MENU_REFRESHED_AT = 0
+    labels = current_menu_labels()
+    changed = labels != previous
+    if changed:
+        MENU_REVISION += 1
+        if connection is not None:
+            connection.emit_signal(None, MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated", GLib.Variant("(ui)", (MENU_REVISION, 0)))
+    return changed
+
+
 def open_url(url: str) -> None:
     subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -155,7 +280,12 @@ def quit_apps(loop: GLib.MainLoop) -> None:
 
 
 def menu_rows(loop: GLib.MainLoop) -> list[tuple[int, str, str]]:
+    status, five_hour, seven_day = current_menu_labels()
     return [
+        (9, status, ""),
+        (10, five_hour, ""),
+        (11, seven_day, ""),
+        (0, "", ""),
         (1, "打开控制中心", "open-window"),
         (0, "", ""),
         (2, "启动/修复", "repair"),
@@ -166,7 +296,7 @@ def menu_rows(loop: GLib.MainLoop) -> list[tuple[int, str, str]]:
         (6, "打开 Web UI", "open-web"),
         (7, "打开日志", "open-log"),
         (0, "", ""),
-        (8, "退出菜单", "quit"),
+        (8, "退出", "quit"),
     ]
 
 
@@ -220,14 +350,17 @@ def sni_property(_connection, _sender, _object_path, _interface, prop):
     return values.get(prop)
 
 
-def dbusmenu_method(_connection, _sender, _object_path, _interface, method, params, invocation, loop: GLib.MainLoop) -> None:
+def dbusmenu_method(connection, _sender, _object_path, _interface, method, params, invocation, loop: GLib.MainLoop) -> None:
     if method == "GetLayout":
-        invocation.return_value(GLib.Variant.new_tuple(GLib.Variant("u", 1), menu_layout(loop)))
+        refresh_menu(connection)
+        invocation.return_value(GLib.Variant.new_tuple(GLib.Variant("u", MENU_REVISION), menu_layout(loop)))
     elif method == "GetGroupProperties":
+        refresh_menu(connection)
         ids = params.unpack()[0]
         rows = [(item_id, item_properties(item_id, label)) for item_id, label, _ in menu_rows(loop) if not ids or item_id in ids]
         invocation.return_value(GLib.Variant("(a(ia{sv}))", (rows,)))
     elif method == "GetProperty":
+        refresh_menu(connection)
         item_id, name = params.unpack()
         props = {}
         for row_id, label, _action in menu_rows(loop):
@@ -239,17 +372,22 @@ def dbusmenu_method(_connection, _sender, _object_path, _interface, method, para
         item_id, event_id, _data, _timestamp = params.unpack()
         if event_id == "clicked":
             activate(action_for_id(item_id, loop), loop)
+            refresh_menu(connection, force=True)
         invocation.return_value(None)
     elif method == "EventGroup":
         events = params.unpack()[0]
         for item_id, event_id, _data, _timestamp in events:
             if event_id == "clicked":
                 activate(action_for_id(item_id, loop), loop)
+        refresh_menu(connection, force=True)
         invocation.return_value(GLib.Variant("(ai)", ([],)))
     elif method == "AboutToShow":
-        invocation.return_value(GLib.Variant("(b)", (False,)))
+        changed = refresh_menu(connection, force=True)
+        invocation.return_value(GLib.Variant("(b)", (changed,)))
     elif method == "AboutToShowGroup":
-        invocation.return_value(GLib.Variant("(aiai)", ([], [])))
+        ids = params.unpack()[0]
+        changed = refresh_menu(connection, force=True)
+        invocation.return_value(GLib.Variant("(aiai)", (ids if changed else [], [])))
     else:
         invocation.return_dbus_error("com.fank1ng.dachshund.Unsupported", f"unsupported method: {method}")
 
@@ -264,22 +402,28 @@ def dbusmenu_property(_connection, _sender, _object_path, _interface, prop):
     return values.get(prop)
 
 
-def register_watcher(connection: Gio.DBusConnection) -> bool:
-    try:
-        proxy = Gio.DBusProxy.new_sync(
-            connection,
-            Gio.DBusProxyFlags.NONE,
-            None,
-            "org.kde.StatusNotifierWatcher",
-            "/StatusNotifierWatcher",
-            "org.kde.StatusNotifierWatcher",
-            None,
-        )
-        proxy.call_sync("RegisterStatusNotifierItem", GLib.Variant("(s)", (BUS_NAME,)), Gio.DBusCallFlags.NONE, 5000, None)
-        return True
-    except Exception as exc:
-        print(f"status notifier watcher unavailable: {exc}", file=sys.stderr)
-        return False
+def register_watcher(connection: Gio.DBusConnection, *, timeout_seconds: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while True:
+        try:
+            proxy = Gio.DBusProxy.new_sync(
+                connection,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.kde.StatusNotifierWatcher",
+                "/StatusNotifierWatcher",
+                "org.kde.StatusNotifierWatcher",
+                None,
+            )
+            proxy.call_sync("RegisterStatusNotifierItem", GLib.Variant("(s)", (BUS_NAME,)), Gio.DBusCallFlags.NONE, 5000, None)
+            return True
+        except Exception as exc:
+            last_error = str(exc)
+            if time.monotonic() >= deadline:
+                print(f"status notifier watcher unavailable: {last_error}", file=sys.stderr)
+                return False
+            time.sleep(1)
 
 
 def main() -> int:
