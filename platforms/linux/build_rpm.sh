@@ -97,6 +97,9 @@ start_native_menu() {
 }
 
 case "${1:-}" in
+  --quit)
+    exec "$REAL_DACHSHUND" "$@"
+    ;;
   --native-menu-helper)
     shift
     kde_helper_env
